@@ -51,13 +51,29 @@ NO_ORDER_WITH_PRICE = {
         "direction": "bullish",
         "key_signals": ["signal1"],
     },
+    "decision_trace": [
+        {
+            "node_id": "9.2",
+            "section": "入场",
+            "question": "信号方向一致？",
+            "answer": "否",
+            "reason": "无效",
+            "skipped": False,
+            "bar_range": "K1",
+        },
+    ],
+    "terminal": {
+        "node_id": "10.3",
+        "outcome": "reject",
+        "label": "不下单但价格字段违规",
+    },
 }
 
 
 def test_no_order_with_entry_price(frame, exc_counter, pending_writer, assembler, exp_reader):
     """order_type='不下单' with entry_price=0 → category 'c', count == 1."""
     client = MagicMock()
-    client.chat.side_effect = [
+    client.stream_chat.side_effect = [
         make_reply(VALID_STAGE1),
         _make_reply(NO_ORDER_WITH_PRICE),
     ]

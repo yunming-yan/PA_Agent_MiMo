@@ -12,6 +12,94 @@ from pa_agent.orchestrator.exception_counter import ExceptionCounter
 
 # ── Valid JSON payloads ───────────────────────────────────────────────────────
 
+SAMPLE_GATE_TRACE = [
+    {
+        "node_id": "0.1",
+        "question": "是否看得懂当前市场？",
+        "answer": "是",
+        "action": "继续",
+        "reason": "结构清晰",
+        "section": "总原则",
+        "bar_range": "K100-K1",
+    },
+    {
+        "node_id": "1.2",
+        "question": "是否能识别市场周期？",
+        "answer": "是",
+        "action": "继续",
+        "reason": "normal_channel",
+        "section": "是否可以决策",
+        "bar_range": "K50-K1",
+    },
+    {
+        "node_id": "2.3",
+        "question": "当前方向是多头还是空头？",
+        "answer": "是",
+        "action": "继续",
+        "reason": "多头",
+        "branch": "bull",
+        "section": "多空方向判断",
+        "bar_range": "K30-K1",
+    },
+]
+
+SAMPLE_DECISION_TRACE = [
+    {
+        "node_id": "4.1",
+        "section": "通道",
+        "question": "是否出现有序波段结构？",
+        "answer": "是",
+        "reason": "HH+HL",
+        "skipped": False,
+        "bar_range": "K50-K1",
+    },
+    {
+        "node_id": "9.2",
+        "section": "入场信号",
+        "question": "信号K线方向是否与计划方向一致？",
+        "answer": "是",
+        "reason": "阳线",
+        "skipped": False,
+        "bar_range": "K1",
+    },
+    {
+        "node_id": "10.1",
+        "section": "风险收益",
+        "question": "是否能明确止损？",
+        "answer": "是",
+        "reason": "信号棒低点外",
+        "skipped": False,
+        "bar_range": "K1",
+    },
+    {
+        "node_id": "10.2",
+        "section": "风险收益",
+        "question": "止损是否过大？",
+        "answer": "否",
+        "reason": "止损合理",
+        "skipped": False,
+        "bar_range": "K30-K1",
+    },
+    {
+        "node_id": "10.3",
+        "section": "风险收益",
+        "question": "交易者方程是否通过？",
+        "answer": "是",
+        "reason": "RR 约 2:1",
+        "skipped": False,
+        "bar_range": "K1",
+    },
+    {
+        "node_id": "11.2",
+        "section": "下单方式",
+        "question": "是通道回撤吗？",
+        "answer": "是",
+        "reason": "回撤限价",
+        "skipped": False,
+        "bar_range": "K20-K1",
+    },
+]
+
 VALID_STAGE1 = {
     "cycle_position": "normal_channel",
     "direction": "bullish",
@@ -22,6 +110,8 @@ VALID_STAGE1 = {
     "htf_context": "bullish trend",
     "entry_setup": "buy on pullback",
     "strategy_files_needed": ["上涨通道分析识别.txt"],
+    "gate_trace": SAMPLE_GATE_TRACE,
+    "gate_result": "proceed",
 }
 
 VALID_STAGE2 = {
@@ -46,6 +136,12 @@ VALID_STAGE2 = {
         "direction": "bullish",
         "key_signals": ["signal1"],
     },
+    "decision_trace": SAMPLE_DECISION_TRACE,
+    "terminal": {
+        "node_id": "11.2",
+        "outcome": "trade",
+        "label": "10.3 已通过，通道回撤限价入场",
+    },
 }
 
 
@@ -54,8 +150,10 @@ VALID_STAGE2 = {
 def make_reply(content_dict: dict) -> MagicMock:
     """Build a mock AIReply from a content dict."""
     reply = MagicMock()
-    reply.content = json.dumps(content_dict)
+    reply.content = json.dumps(content_dict, ensure_ascii=False)
+    reply.reasoning_content = ""
     reply.raw = {"content": reply.content}
+    reply.latency_ms = 1.0
     reply.usage = MagicMock()
     reply.usage.prompt_tokens = 100
     reply.usage.completion_tokens = 50

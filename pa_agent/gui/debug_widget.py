@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 from pa_agent.security.secret_store import mask_secret
 from pa_agent.config.paths import RECORDS_PENDING_DIR
@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 class DebugWidget(QWidget):
     """Tab 3 debug panel.
+
+    streak_reset:
+        Emitted after the user clears the consecutive validation-error counter.
 
     Left side: QListWidget listing all turns (Stage1, Stage2, Followup-N …).
     Right side: 4 read-only QTextEdit blocks:
@@ -64,6 +67,8 @@ class DebugWidget(QWidget):
     parent:
         Optional parent widget.
     """
+
+    streak_reset = pyqtSignal()
 
     def __init__(
         self,
@@ -285,6 +290,7 @@ class DebugWidget(QWidget):
 
         if self._exc_counter is not None:
             self._exc_counter.reset_streak()
+            self.streak_reset.emit()
             logger.info("DebugWidget: exception streak manually cleared via UI")
             QMessageBox.information(self, "已清除", "连续异常计数已重置为 0。")
         else:

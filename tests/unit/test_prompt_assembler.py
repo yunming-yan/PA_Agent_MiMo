@@ -44,6 +44,7 @@ def assembler(tmp_path: Path) -> PromptAssembler:
     for fname in [
         "提示词大纲_人设与思维方式.txt",
         "市场诊断框架.txt",
+        "二元决策.txt",
         "文件16-K线信号识别.txt",
         "文件17-止损和止盈与仓位管理.txt",
         "上涨通道分析识别.txt",
@@ -55,14 +56,15 @@ def assembler(tmp_path: Path) -> PromptAssembler:
 
 
 def test_stage1_system_prompt_order(assembler: PromptAssembler):
-    """Stage 1 system prompt must contain the 3 always-on files in order."""
+    """Stage 1 system prompt must contain the 4 always-on files in order."""
     frame = _make_frame()
     messages = assembler.build_stage1(frame)
     system = messages[0]["content"]
     pos_persona = system.find("提示词大纲_人设与思维方式")
     pos_diag = system.find("市场诊断框架")
+    pos_binary = system.find("二元决策")
     pos_signal = system.find("文件16-K线信号识别")
-    assert pos_persona < pos_diag < pos_signal, (
+    assert pos_persona < pos_diag < pos_binary < pos_signal, (
         "Stage 1 system prompt files are out of order"
     )
 
@@ -78,8 +80,22 @@ def test_stage1_user_prompt_contains_required_fields(assembler: PromptAssembler)
     assert "更高时间框架" not in user
 
 
+def test_stage2_user_prompt_includes_gate_trace(assembler: PromptAssembler):
+    frame = _make_frame()
+    stage1_json = {
+        "cycle_position": "normal_channel",
+        "direction": "bullish",
+        "gate_result": "proceed",
+        "gate_trace": [{"node_id": "0.1", "question": "q", "answer": "是", "reason": "r"}],
+    }
+    messages = assembler.build_stage2(frame, stage1_json, [], [])
+    user = messages[1]["content"]
+    assert "gate_result=proceed" in user
+    assert "gate_trace" in user or "0.1" in user
+
+
 def test_stage2_system_prompt_order(assembler: PromptAssembler):
-    """Stage 2 system prompt: 人设 → 策略 → 风控 → 契约."""
+    """Stage 2 system prompt: 人设 → 二元决策 → 策略 → 风控 → 契约."""
     frame = _make_frame()
     stage1_json = {"cycle_position": "normal_channel", "direction": "bullish"}
     strategy_files = ["上涨通道分析识别.txt", "上涨通道交易策略.txt", "文件13-窄通道与宽通道策略.txt"]
@@ -87,9 +103,10 @@ def test_stage2_system_prompt_order(assembler: PromptAssembler):
     system = messages[0]["content"]
 
     pos_persona = system.find("提示词大纲_人设与思维方式")
+    pos_binary = system.find("二元决策")
     pos_strategy = system.find("上涨通道分析识别")
     pos_risk = system.find("文件17-止损和止盈与仓位管理")
-    assert pos_persona < pos_strategy < pos_risk, (
+    assert pos_persona < pos_binary < pos_strategy < pos_risk, (
         "Stage 2 system prompt files are out of order"
     )
 
@@ -111,6 +128,8 @@ def test_stage1_output_reminder_present(assembler: PromptAssembler):
     system = messages[0]["content"]
     assert "cycle_position" in system
     assert "diagnosis_confidence" in system
+    assert "gate_trace" in system
+    assert "gate_result" in system
 
 
 def test_stage2_output_contract_present(assembler: PromptAssembler):
@@ -120,6 +139,8 @@ def test_stage2_output_contract_present(assembler: PromptAssembler):
     system = messages[0]["content"]
     assert "不下单" in system
     assert "order_direction" in system
+    assert "decision_trace" in system
+    assert "terminal" in system
 
 
 def test_stage2_experience_entries_included(assembler: PromptAssembler):

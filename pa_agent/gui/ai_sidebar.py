@@ -8,6 +8,8 @@ from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 from pa_agent.gui.ai_stream_window import AIStreamPanel
 from pa_agent.gui.debug_widget import DebugWidget
 from pa_agent.gui.decision_panel import DecisionPanel
+from pa_agent.gui.decision_flow_viz import DecisionFlowVizPanel
+from pa_agent.gui.decision_tree_panel import DecisionTreePanel
 from pa_agent.gui.prompt_files_panel import PromptFilesPanel
 
 if TYPE_CHECKING:
@@ -16,7 +18,7 @@ if TYPE_CHECKING:
 
 
 class AISidebar(QWidget):
-    """Workbench sidebar tabs: 实时 | 原始 | 调试 | 决策."""
+    """Workbench sidebar tabs: 实时 | 决策树 | 决策树可视化 | 决策 | 原始 | 调试."""
 
     def __init__(
         self,
@@ -32,11 +34,15 @@ class AISidebar(QWidget):
         self.debug = DebugWidget(api_key=api_key, exc_counter=exc_counter)
         self.prompt_files = PromptFilesPanel()
         self.decision = DecisionPanel()
+        self.decision_tree = DecisionTreePanel()
+        self.decision_flow_viz = DecisionFlowVizPanel()
 
         self._tabs.addTab(self.stream, "实时")
+        self._tabs.addTab(self.decision_tree, "决策树")
+        self._tabs.addTab(self.decision_flow_viz, "决策树可视化")
+        self._tabs.addTab(self.decision, "决策")
         self._tabs.addTab(self.debug, "原始")
         self._tabs.addTab(self.prompt_files, "调试")
-        self._tabs.addTab(self.decision, "决策")
 
         if settings is not None:
             self.stream.bind_settings(settings)

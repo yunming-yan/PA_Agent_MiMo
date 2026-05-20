@@ -34,7 +34,7 @@ def test_stage2_invalid_confidence(frame, exc_counter, pending_writer, assembler
     bad_stage2["decision"]["trade_confidence"] = "ultra"
 
     client = MagicMock()
-    client.chat.side_effect = [
+    client.stream_chat.side_effect = [
         make_reply(VALID_STAGE1),
         _make_reply(bad_stage2),
     ]

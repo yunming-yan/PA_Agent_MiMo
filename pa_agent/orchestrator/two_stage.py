@@ -354,6 +354,35 @@ class TwoStageOrchestrator:
         if on_stage2_files is not None:
             on_stage2_files(list(strategy_files))
 
+        gate_result = str(stage1_json.get("gate_result", "proceed")).lower()
+        if gate_result in ("wait", "unknown"):
+            from pa_agent.ai.decision_tree import build_stage2_gate_wait_response
+
+            stage2_json = build_stage2_gate_wait_response(stage1_json)
+            on_event(OrchestratorEvent.Stage2Done)
+            self._exc_counter.on_round_trip_success()
+            usage_total = _accumulate_usage(record.usage_total, reply_s1.usage)
+            record = record.model_copy(
+                update={
+                    "stage1_messages": messages_s1,
+                    "stage1_response": reply_s1.raw,
+                    "stage1_diagnosis": stage1_json,
+                    "stage2_messages": [],
+                    "stage2_response": None,
+                    "stage2_decision": stage2_json,
+                    "strategy_files_used": strategy_files,
+                    "experience_loaded": [
+                        e.model_dump() if hasattr(e, "model_dump") else dict(e)
+                        for e in experience_entries
+                    ],
+                    "usage_total": usage_total,
+                    "exception": None,
+                }
+            )
+            self._pending_writer.save_full(record)
+            on_event(OrchestratorEvent.RecordSaved)
+            return record
+
         # ── Step 14: Build Stage 2 messages ───────────────────────────────────
         messages_s2 = self._assembler.build_stage2(
             frame, stage1_json, strategy_files, experience_entries

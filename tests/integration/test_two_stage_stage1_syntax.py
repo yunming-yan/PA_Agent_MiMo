@@ -27,7 +27,7 @@ def _make_text_reply(text: str) -> MagicMock:
 def test_stage1_plain_text(frame, exc_counter, pending_writer, assembler, exp_reader):
     """Stage 1 returns plain text → consecutive_count increments, Stage2 never starts."""
     client = MagicMock()
-    client.chat.return_value = _make_text_reply(
+    client.stream_chat.return_value = _make_text_reply(
         "Sorry, I cannot provide a JSON response right now."
     )
 

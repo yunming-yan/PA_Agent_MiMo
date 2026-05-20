@@ -17,7 +17,7 @@ from .conftest import VALID_STAGE1, VALID_STAGE2, make_reply
 def test_happy_path(frame, exc_counter, pending_writer, assembler, exp_reader):
     """Both stages return valid JSON → full record saved, counter stays at 0."""
     client = MagicMock()
-    client.chat.side_effect = [
+    client.stream_chat.side_effect = [
         make_reply(VALID_STAGE1),
         make_reply(VALID_STAGE2),
     ]

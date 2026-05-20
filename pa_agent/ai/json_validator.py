@@ -103,6 +103,15 @@ class JsonValidator:
                 message="Top-level JSON value is not an object",
             )
 
+        if stage == "stage1":
+            from pa_agent.ai.stage1_normalizer import normalize_stage1
+
+            obj = normalize_stage1(obj)
+        elif stage == "stage2":
+            from pa_agent.ai.stage2_normalizer import normalize_stage2
+
+            obj = normalize_stage2(obj)
+
         # ── Schema validation (b and c) ───────────────────────────────────────
         try:
             import jsonschema  # type: ignore[import]
@@ -130,11 +139,22 @@ class JsonValidator:
                     allowed[str(path)] = err.schema["enum"]
 
         # ── Explicit 不下单 ↔ null iron law check ─────────────────────────────
+        if stage == "stage1":
+            from pa_agent.ai.decision_tree import validate_gate_result_consistency
+
+            for msg in validate_gate_result_consistency(obj):
+                invalid.append(f"gate:{msg}")
+
         if stage == "stage2":
             no_order_err = self._check_no_order_invariant(obj)
             if no_order_err:
                 invalid.extend(no_order_err["fields"])
                 allowed.update(no_order_err["allowed"])
+
+            from pa_agent.ai.decision_tree import validate_stage2_trace_consistency
+
+            for msg in validate_stage2_trace_consistency(obj):
+                invalid.append(f"trace:{msg}")
 
         # Determine category: b if only missing fields, c otherwise
         if invalid or (missing and errors[0].validator not in ("required",)):

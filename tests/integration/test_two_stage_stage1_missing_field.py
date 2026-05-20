@@ -33,7 +33,7 @@ def test_stage1_missing_cycle_position(frame, exc_counter, pending_writer, assem
     bad_stage1 = {k: v for k, v in VALID_STAGE1.items() if k != "cycle_position"}
 
     client = MagicMock()
-    client.chat.return_value = _make_reply(bad_stage1)
+    client.stream_chat.return_value = _make_reply(bad_stage1)
 
     validator = JsonValidator()
     orchestrator = TwoStageOrchestrator(

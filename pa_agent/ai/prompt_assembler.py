@@ -30,10 +30,53 @@ _STAGE1_OUTPUT_REMINDER = """
   "key_signals": [],
   "htf_context": "",
   "entry_setup": "",
-  "strategy_files_needed": [],
-  "risk_warning": ""
+  "strategy_files_needed": ["下跌通道分析识别.txt", "下跌通道交易策略.txt"],
+  "risk_warning": "",
+  "gate_trace": [
+    {
+      "node_id": "0.1",
+      "question": "是否看得懂当前市场？",
+      "answer": "是",
+      "action": "继续",
+      "reason": "结构清晰",
+      "branch": "yes",
+      "section": "总原则",
+      "bar_range": "由你填写，如 K42-K1"
+    }
+  ],
+  "gate_result": "proceed"
 }
 ```
+
+## 阶段一闸门（二元决策树 §0–§2，必须执行）
+
+在输出诊断 JSON 前，按《二元决策.txt》**依次**评估以下节点，并写入 gate_trace（仅记录你实际评估的节点，通常 6–10 条）：
+§0：0.1 看得懂市场 → 0.2 是否具备继续分析的条件（定性，**不是**交易者方程）
+§1：1.1 数据足够 → 1.2 识别周期 → 1.3 极端混乱
+§2：2.1 惯性方向 → 2.2 大时间框架 → 2.3 多/空/中性（**answer 只能用 是/否/中性**；方向写在 branch：bullish/bearish/neutral，勿写「多头」「空头」作 answer）
+
+**禁止在阶段一评估：**
+- **0.3**（交易者方程仅为原则；数值检验在阶段二 **10.3**）
+- **§9–§11**（入场、风险、下单均属阶段二）
+
+规则：
+- answer 只能是：是 / 否 / 中性 / 等待 / 不适用
+- 任一闸门导致「等待/unknown」时，gate_result 设为 wait 或 unknown，并在最后一条 trace 写明 reason
+- gate_result=proceed 表示可通过闸门进入阶段二；wait/unknown 表示不应进入策略与下单评估
+- gate_trace 与 cycle_position、direction 不得矛盾
+
+**每条 gate_trace / decision_trace 必须包含 bar_range（K线依据，由你自行判断）：**
+- **程序不会替你填写**；你必须根据「本节点实际引用了哪些 K 线」写出序号范围
+- 格式：`K{较老序号}-K{较新序号}` 或单根 `K1`（**序号1=最新已收盘**，序号越大越早）
+- **每个节点的 bar_range 应不同**（除非该节点确实与上一节点使用完全相同窗口）；禁止所有节点照抄同一个范围
+- 区间格式必须为 **K{较老}-K{较新}**（如 K4-K1），**禁止** K1-K4；单根写 K1；全图分析可写「全局」（程序会展开）
+- 方向/分类类节点（如 4.2 上涨还是下跌）：**answer 只用 是/否/中性**，方向写在 **branch**（bullish/bearish），勿写「上涨」「下跌」作 answer
+- **6.2**（区间类型）：answer=是/否，branch=trending_tr 或 trading_range；勿把「趋势型交易区间」写在 answer
+- **6.3**（是否在边界）：answer=是/否，branch=lower/upper/middle；勿写「是，在下边界」——应写 answer=是、branch=lower
+- 扫描类节点（如禁止行为）：answer 用 **是**（通过）或 **否**（触犯），勿写「通过」
+- **禁止照抄**本提示 JSON 示例里的占位文字或说明中的举例数字；必须对应当前 K 线表与你在 reason 中的分析
+- 跳过节点（skipped:true）可填 `不适用`
+- question 只写问题本身，不要把 bar_range 写进 question
 
 diagnosis_confidence 必须为 0-100 的整数(满分100),表示对 cycle_position 等诊断结论的综合置信评分。
 禁止使用 high、medium、low 等字符串;分数越高表示对当前市场状态判断越有把握。
@@ -72,9 +115,52 @@ _STAGE2_OUTPUT_CONTRACT = """
     "cycle_position": "",
     "direction": "",
     "key_signals": []
+  },
+  "decision_trace": [
+    {
+      "node_id": "4.1",
+      "section": "通道",
+      "question": "是否出现有序波段结构？",
+      "answer": "是",
+      "reason": "HH+HL",
+      "skipped": false,
+      "bar_range": "由你填写"
+    }
+  ],
+  "terminal": {
+    "node_id": "11.2",
+    "outcome": "trade",
+    "label": "..."
   }
 }
 ```
+
+说明：decision_trace 需输出完整决策路径（通常多条）；每条 trace 的 **bar_range 必须由你根据该节点实际使用的 K 线填写**，不得照抄示例。
+
+## 阶段二决策路径（二元决策树 §3–§11、§14）
+
+阶段一 gate_result=proceed 时，decision_trace 必须遵守**执行顺序**（可跳过不适用分支，但不可乱序）：
+
+1. **§3–§8** 按 cycle_position 走对应结构分支（尖峰/通道/区间/反转/楔形等）
+2. **§9** 入场信号二元检查（9.1→9.5，须先确认信号 K 线收盘）
+3. **§10** 风险收益（必须按序）：**10.1 止损明确 → 10.2 止损不过大 → 10.3 交易者方程 → 10.4 单笔风险**
+4. **§11** 下单方式（仅当 10.3 为「是」且拟下单时评估 11.1–11.4）
+5. **§14** 禁止行为清单：下单前快速扫描，触犯任一条 → order_type=不下单
+
+**交易者方程（10.3）规则：**
+- 必须使用已拟定的 entry / stop / target 估算胜率、回报、风险后再判
+- **10.3 通过之前**不得输出具体下单类型；**10.3 之后**才写 §11
+- 因方程不通过而放弃：terminal.node_id 应为 **10.3**，outcome=reject 或 wait
+
+**跳过规则：**
+- 无持仓：跳过 §12、§13（不写 trace）
+- 不适用分支：skipped:true，answer=不适用
+
+terminal 必须与 order_type 一致：
+- 有下单 → outcome=trade，terminal.node_id 建议为最后一个 §11 节点
+- 不下单 → outcome=wait 或 reject
+
+阶段一 gate_result 为 wait/unknown 时：系统会短路，不应调用本阶段。
 
 置信度分为两部分，各自独立打分（均为 0–100 整数，必须填写）：
 
@@ -101,11 +187,13 @@ trade_confidence_reasoning：必须简要说明打分依据（如“入场信号
 STAGE1_PROMPT_TXT_FILES: tuple[str, ...] = (
     "提示词大纲_人设与思维方式.txt",
     "市场诊断框架.txt",
+    "二元决策.txt",
     "文件16-K线信号识别.txt",
 )
 
 STAGE2_BASE_PROMPT_TXT_FILES: tuple[str, ...] = (
     "提示词大纲_人设与思维方式.txt",
+    "二元决策.txt",
     "文件17-止损和止盈与仓位管理.txt",
 )
 
@@ -179,9 +267,12 @@ class PromptAssembler:
         system_content = "\n\n" + "\n\n---\n\n".join(p for p in system_parts if p)
 
         kline_table = self._render_kline_table(frame)
+        n_bars = len(frame.bars)
         user_content = (
             f"## 当前分析目标\n\n"
-            f"品种:{frame.symbol} 周期:{frame.timeframe} K线数量:{len(frame.bars)}\n\n"
+            f"品种:{frame.symbol} 周期:{frame.timeframe} K线数量:{n_bars}\n"
+            f"（K线序号：1=最新已收盘，最大 K{n_bars}；"
+            f"每个决策节点的 bar_range 由你自行选择子区间，勿超出 K{n_bars}-K1）\n\n"
             f"## K线数据(序号1=最新已收盘K线,序号越大越早;不含当前未收盘K线)\n\n"
             f"{kline_table}\n\n"
             f"请根据以上数据,按照系统提示中的格式输出 JSON 诊断结果。"
@@ -215,10 +306,22 @@ class PromptAssembler:
 
         # User prompt
         kline_table = self._render_kline_table(frame)
+        gate_result = stage1_json.get("gate_result", "proceed")
+        gate_trace = stage1_json.get("gate_trace") or []
+        gate_block = ""
+        if gate_trace:
+            gate_block = (
+                f"## 阶段一闸门路径 (gate_result={gate_result})\n\n"
+                f"```json\n{json.dumps(gate_trace, ensure_ascii=False, indent=2)}\n```\n\n"
+            )
+
+        n_bars = len(frame.bars)
         user_content = (
             f"## 阶段一诊断结果\n\n```json\n{json.dumps(stage1_json, ensure_ascii=False, indent=2)}\n```\n\n"
-            f"## K线数据(与阶段一相同)\n\n{kline_table}\n\n"
-            f"请根据以上诊断结果和K线数据,按照系统提示中的格式输出 JSON 决策结果。\n"
+            f"{gate_block}"
+            f"## K线数据(与阶段一相同, 共{n_bars}根；各节点 bar_range 由你据实填写)\n\n{kline_table}\n\n"
+            f"请根据以上诊断、闸门路径和K线数据,按《二元决策.txt》§3–§15 输出 JSON 决策结果"
+            f"(含 decision_trace 与 terminal)。\n"
             f"注意:如果判断不下单,entry_price、take_profit_price、stop_loss_price、order_direction 必须全部为 null。"
         )
 

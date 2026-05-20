@@ -28,41 +28,7 @@ from pa_agent.util.threading import CancelToken, OrchestratorEvent
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-VALID_STAGE1 = {
-    "cycle_position": "normal_channel",
-    "direction": "bullish",
-    "diagnosis_confidence": 75,
-    "market_phase": "stable",
-    "detected_patterns": [],
-    "key_signals": ["signal1"],
-    "htf_context": "bullish trend",
-    "entry_setup": "buy on pullback",
-    "strategy_files_needed": ["上涨通道分析识别.txt"],
-}
-
-VALID_STAGE2 = {
-    "decision": {
-        "order_direction": "做多",
-        "order_type": "限价单",
-        "entry_price": 2000.0,
-        "take_profit_price": 2050.0,
-        "stop_loss_price": 1980.0,
-        "reasoning": "Strong bullish signal",
-        "diagnosis_confidence": 75,
-        "diagnosis_confidence_reasoning": "周期位置明确",
-        "trade_confidence": 70,
-        "trade_confidence_reasoning": "入场信号明确",
-        "key_factors": ["factor1"],
-        "watch_points": ["watch1"],
-        "risk_assessment": "low risk",
-        "invalidation_condition": "break below 1980",
-    },
-    "diagnosis_summary": {
-        "cycle_position": "normal_channel",
-        "direction": "bullish",
-        "key_signals": ["signal1"],
-    },
-}
+from tests.fixtures.ai_payloads import VALID_STAGE1, VALID_STAGE2
 
 
 def _make_frame() -> KlineFrame:
@@ -191,7 +157,7 @@ class TestSwitchMidAnalysis:
             return _make_reply(VALID_STAGE2)
 
         mock_client = MagicMock()
-        mock_client.chat.side_effect = [
+        mock_client.stream_chat.side_effect = [
             _make_reply(VALID_STAGE1),  # stage1 returns immediately
             slow_stage2_chat,           # stage2 blocks
         ]
@@ -207,7 +173,7 @@ class TestSwitchMidAnalysis:
             else:
                 return slow_stage2_chat(messages, **kwargs)
 
-        mock_client.chat.side_effect = chat_dispatch
+        mock_client.stream_chat.side_effect = chat_dispatch
 
         # Wire up the orchestrator components
         from pa_agent.ai.json_validator import JsonValidator
@@ -301,7 +267,7 @@ class TestSwitchMidAnalysis:
                 return _make_reply(VALID_STAGE2)
 
         mock_client = MagicMock()
-        mock_client.chat.side_effect = chat_dispatch
+        mock_client.stream_chat.side_effect = chat_dispatch
 
         app_ctx.client = mock_client
         app_ctx.assembler = MagicMock()
@@ -378,7 +344,7 @@ class TestSwitchMidAnalysis:
                 return _make_reply(VALID_STAGE2)
 
         mock_client = MagicMock()
-        mock_client.chat.side_effect = chat_dispatch
+        mock_client.stream_chat.side_effect = chat_dispatch
 
         app_ctx.client = mock_client
         app_ctx.assembler = MagicMock()
@@ -499,7 +465,7 @@ class TestSwitchMidAnalysis:
                 return _make_reply(VALID_STAGE2)
 
         mock_client = MagicMock()
-        mock_client.chat.side_effect = chat_dispatch
+        mock_client.stream_chat.side_effect = chat_dispatch
 
         app_ctx.client = mock_client
         app_ctx.assembler = MagicMock()

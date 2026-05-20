@@ -1,6 +1,56 @@
 """JSON schemas for Stage 1 and Stage 2 AI outputs."""
 from __future__ import annotations
 
+# ── Shared trace item schemas (二元决策树) ─────────────────────────────────────
+
+_TRACE_ITEM: dict = {
+    "type": "object",
+    "required": ["node_id", "question", "answer", "reason", "bar_range"],
+    "properties": {
+        "node_id": {"type": "string"},
+        "question": {"type": "string"},
+        "answer": {
+            "type": "string",
+            "enum": ["是", "否", "中性", "等待", "不适用"],
+        },
+        "action": {"type": "string"},
+        "reason": {"type": "string"},
+        "branch": {"type": ["string", "null"]},
+        "next_node": {"type": ["string", "null"]},
+        "skipped": {"type": "boolean"},
+        "section": {"type": "string"},
+        "bar_range": {
+            "type": "string",
+            "description": "K-line basis e.g. K50-K1 (seq1=newest closed bar)",
+        },
+        "bar_from": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Older bar seq (larger number)",
+        },
+        "bar_to": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Newer bar seq (smaller, often 1)",
+        },
+    },
+    "additionalProperties": True,
+}
+
+_TERMINAL: dict = {
+    "type": "object",
+    "required": ["node_id", "outcome", "label"],
+    "properties": {
+        "node_id": {"type": "string"},
+        "outcome": {
+            "type": "string",
+            "enum": ["wait", "reject", "trade", "proceed"],
+        },
+        "label": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
 # ── Stage 1 schema ────────────────────────────────────────────────────────────
 
 STAGE1_SCHEMA: dict = {
@@ -16,6 +66,8 @@ STAGE1_SCHEMA: dict = {
         "htf_context",
         "entry_setup",
         "strategy_files_needed",
+        "gate_trace",
+        "gate_result",
     ],
     "properties": {
         "cycle_position": {
@@ -43,14 +95,21 @@ STAGE1_SCHEMA: dict = {
         "entry_setup": {"type": "string"},
         "strategy_files_needed": {"type": "array", "items": {"type": "string"}},
         "risk_warning": {"type": "string"},
+        "gate_trace": {
+            "type": "array",
+            "minItems": 1,
+            "items": _TRACE_ITEM,
+        },
+        "gate_result": {
+            "type": "string",
+            "enum": ["proceed", "wait", "unknown"],
+        },
     },
     "allOf": [
-        # spike / micro_channel require spike_stage to be non-null
+        # spike only requires spike_stage (micro_channel may keep spike_stage null)
         {
             "if": {
-                "properties": {
-                    "cycle_position": {"enum": ["spike", "micro_channel"]}
-                },
+                "properties": {"cycle_position": {"const": "spike"}},
                 "required": ["cycle_position"],
             },
             "then": {
@@ -153,7 +212,7 @@ _DECISION_BASE: dict = {
 STAGE2_SCHEMA: dict = {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "type": "object",
-    "required": ["decision", "diagnosis_summary"],
+    "required": ["decision", "diagnosis_summary", "decision_trace", "terminal"],
     "properties": {
         "decision": _DECISION_BASE,
         "diagnosis_summary": {
@@ -165,6 +224,12 @@ STAGE2_SCHEMA: dict = {
                 "key_signals": {"type": "array", "items": {"type": "string"}},
             },
         },
+        "decision_trace": {
+            "type": "array",
+            "items": _TRACE_ITEM,
+        },
+        "terminal": _TERMINAL,
+        "gate_shortcircuited": {"type": "boolean"},
     },
     "additionalProperties": True,
 }

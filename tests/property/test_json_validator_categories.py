@@ -21,6 +21,16 @@ def _valid_stage1() -> dict:
         "entry_setup": "pullback to EMA20",
         "strategy_files_needed": ["上涨通道分析识别.txt"],
         "risk_warning": "watch for reversal",
+        "gate_trace": [
+            {
+                "node_id": "0.1",
+                "question": "是否看得懂当前市场？",
+                "answer": "是",
+                "reason": "ok",
+                "bar_range": "K100-K1",
+            }
+        ],
+        "gate_result": "proceed",
     }
 
 
@@ -46,6 +56,41 @@ def _valid_stage2() -> dict:
             "cycle_position": "normal_channel",
             "direction": "bullish",
             "key_signals": ["HH+HL"],
+        },
+        "decision_trace": [
+            {
+                "node_id": "9.1",
+                "question": "信号K线是否已经收盘？",
+                "answer": "是",
+                "reason": "已收盘",
+                "bar_range": "K1",
+            },
+            {
+                "node_id": "10.1",
+                "question": "是否能明确止损？",
+                "answer": "是",
+                "reason": "可定义",
+                "bar_range": "K1",
+            },
+            {
+                "node_id": "10.2",
+                "question": "止损是否过大？",
+                "answer": "否",
+                "reason": "合理",
+                "bar_range": "K30-K1",
+            },
+            {
+                "node_id": "10.3",
+                "question": "交易者方程是否通过？",
+                "answer": "否",
+                "reason": "RR不足",
+                "bar_range": "K1",
+            },
+        ],
+        "terminal": {
+            "node_id": "10.3",
+            "outcome": "wait",
+            "label": "交易者方程未通过",
         },
     }
 

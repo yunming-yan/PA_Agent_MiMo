@@ -6,6 +6,7 @@ from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -146,6 +147,13 @@ class MainWindow(QMainWindow):
         self._cancel_token: Any = None
         self._analysis_in_progress = False
         self._switching = False
+        self._chart_refresh_paused = False
+        self._pending_submit_after_close = False
+        self._wait_forming_ts: int | None = None
+        self._pending_submit_symbol = ""
+        self._pending_submit_timeframe = ""
+        self._pending_submit_bar_count = 0
+        self._last_forming_ts_open: int | None = None
         self._free_chat_session: Any = None
         self._last_stage1_diagnosis: dict | None = None
         # RefreshLoop runs in its own QThread
@@ -155,6 +163,8 @@ class MainWindow(QMainWindow):
         self._connect_event_bus()
         self._start_refresh_loop()
         self._update_ai_mode_label()
+        self._debug_widget.streak_reset.connect(self._on_exception_streak_reset)
+        self._sync_submit_button_state()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -176,6 +186,8 @@ class MainWindow(QMainWindow):
         self._debug_widget = self._ai_sidebar.debug
         self._prompt_files_panel = self._ai_sidebar.prompt_files
         self._decision_panel = self._ai_sidebar.decision
+        self._decision_tree_panel = self._ai_sidebar.decision_tree
+        self._decision_flow_viz_panel = self._ai_sidebar.decision_flow_viz
 
         self._central = self._build_workbench()
         self.setCentralWidget(self._central)
@@ -184,6 +196,7 @@ class MainWindow(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("就绪")
+        self._sync_submit_button_state()
 
         # ── Menu bar ──────────────────────────────────────────────────────────
         menu_bar: QMenuBar = self.menuBar()  # type: ignore[assignment]
@@ -240,11 +253,30 @@ class MainWindow(QMainWindow):
 
         ctrl_layout.addStretch()
 
+        self._wait_close_checkbox = QCheckBox("等待最新K线收盘后再提交分析")
+        self._wait_close_checkbox.setChecked(False)
+        self._wait_close_checkbox.setToolTip(
+            "勾选后，点击提交分析将先等待当前未收盘K线走完，再抓取数据并开始分析"
+        )
+        self._wait_close_checkbox.stateChanged.connect(self._on_wait_close_checkbox_changed)
+        ctrl_layout.addWidget(self._wait_close_checkbox)
+
+        self._wait_close_countdown_label = QLabel("")
+        self._wait_close_countdown_label.setObjectName("mutedLabel")
+        self._wait_close_countdown_label.setMinimumWidth(100)
+        ctrl_layout.addWidget(self._wait_close_countdown_label)
+
         self._submit_btn = QPushButton("提交分析")
         self._submit_btn.setObjectName("primaryButton")
         self._submit_btn.setMinimumWidth(100)
         self._submit_btn.clicked.connect(self._on_submit_analysis)
         ctrl_layout.addWidget(self._submit_btn)
+
+        self._resume_chart_btn = QPushButton("图表实时更新")
+        self._resume_chart_btn.setEnabled(False)
+        self._resume_chart_btn.setToolTip("分析进行中会暂停图表刷新；分析开始后点此恢复 K 线实时更新")
+        self._resume_chart_btn.clicked.connect(self._on_resume_chart_refresh)
+        ctrl_layout.addWidget(self._resume_chart_btn)
 
         self._decision_badge = QLabel("")
         self._decision_badge.setObjectName("mutedLabel")
@@ -286,9 +318,6 @@ class MainWindow(QMainWindow):
         workbench.setStretchFactor(1, 2)
 
         outer_layout.addWidget(workbench, stretch=1)
-
-        # Initial button state
-        self._update_submit_button_state()
 
         # Connect symbol/timeframe combo boxes to the switch handler
         self._symbol_combo.currentTextChanged.connect(
@@ -363,11 +392,62 @@ class MainWindow(QMainWindow):
             if panel is not None:
                 panel.on_analysis_progress(text)
 
+    def _set_chart_refresh_paused(self, paused: bool) -> None:
+        """Pause or resume live chart updates from RefreshLoop."""
+        self._chart_refresh_paused = paused
+        btn = getattr(self, "_resume_chart_btn", None)
+        if btn is not None:
+            btn.setEnabled(paused)
+
+    def _on_resume_chart_refresh(self) -> None:
+        """User requested live chart updates again."""
+        if not self._chart_refresh_paused:
+            return
+        self._set_chart_refresh_paused(False)
+        self._status_bar.showMessage("图表已恢复实时更新")
+        self._refresh_chart_once()
+
+    def _refresh_chart_once(self) -> None:
+        """Apply one immediate chart refresh (e.g. after resuming)."""
+        data_source = getattr(self._ctx, "data_source", None)
+        if data_source is None or not getattr(data_source, "_connected", False):
+            return
+        try:
+            n_bars = self._bar_count_spin.value() + 5
+            bars = data_source.latest_snapshot(n_bars)
+            if bars:
+                self._on_refresh_frame_ready(bars)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Immediate chart refresh failed: %s", exc)
+
     def _update_refresh_elapsed(self) -> None:
         """Update the 'distance from last refresh' label every second."""
         import time as _time
+
+        self._update_wait_close_countdown_display()
+
         label = getattr(self, "_refresh_elapsed_label", None)
         if label is None:
+            return
+        if self._pending_submit_after_close:
+            secs = self._forming_bar_seconds_remaining()
+            if secs is not None:
+                label.setText(f"等待K线收盘，还剩 {secs}s")
+            else:
+                label.setText("等待最新K线收盘…")
+            label.setStyleSheet("color: #58a6ff; font-size: 11px;")
+            return
+        if self._wait_close_checkbox.isChecked():
+            secs = self._forming_bar_seconds_remaining()
+            if secs is not None:
+                label.setText(f"距最新K线收盘还剩 {secs}s")
+            else:
+                label.setText("距最新K线收盘: —")
+            label.setStyleSheet("color: #58a6ff; font-size: 11px;")
+            return
+        if self._chart_refresh_paused:
+            label.setText("图表刷新已暂停（分析中）")
+            label.setStyleSheet("color: #e6b800; font-size: 11px;")
             return
         if self._last_refresh_ts == 0.0:
             label.setText("距上次刷新: —")
@@ -396,6 +476,19 @@ class MainWindow(QMainWindow):
         rather than reading back from the buffer, which avoids ordering issues
         caused by repeated appendleft() calls corrupting the buffer's deque.
         """
+        if bars:
+            from pa_agent.data.bar_close_wait import current_forming_ts
+
+            ts = current_forming_ts(bars)
+            if ts is not None:
+                self._last_forming_ts_open = ts
+
+        if self._pending_submit_after_close and bars:
+            self._check_pending_bar_close(bars)
+
+        if self._chart_refresh_paused:
+            return
+
         if not bars:
             return
 
@@ -466,6 +559,8 @@ class MainWindow(QMainWindow):
         if self._switching:
             return  # Prevent re-entrant calls
 
+        self._clear_pending_bar_close_wait()
+
         self._switching = True
         try:
             # ── Step 1: Cancel current AI worker ─────────────────────────────
@@ -529,6 +624,8 @@ class MainWindow(QMainWindow):
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("ledger.reset() failed: %s", exc)
 
+            self._set_chart_refresh_paused(False)
+
             self._status_bar.showMessage(f"已切换至 {new_symbol} {new_tf}")
             logger.info("Symbol/TF switched to %s %s", new_symbol, new_tf)
 
@@ -545,12 +642,157 @@ class MainWindow(QMainWindow):
 
         finally:
             self._switching = False
+            if self._wait_close_checkbox.isChecked():
+                self._refresh_last_forming_ts()
+                self._update_wait_close_countdown_display()
 
     def _disable_chat_input(self) -> None:
         """Disable free-chat input in the AI stream window."""
         panel = getattr(self, "_stream_panel", None)
         if panel is not None:
             panel.set_input_enabled(False)
+
+    def _on_wait_close_checkbox_changed(self, _state: int) -> None:
+        """Cancel pending wait if user unchecks the option."""
+        if self._wait_close_checkbox.isChecked():
+            self._refresh_last_forming_ts()
+        else:
+            if self._pending_submit_after_close:
+                self._clear_pending_bar_close_wait()
+            self._status_bar.showMessage("已取消等待K线收盘")
+        self._update_wait_close_countdown_display()
+
+    def _refresh_last_forming_ts(self) -> None:
+        """Snapshot newest forming bar ts_open for countdown display."""
+        from pa_agent.data.bar_close_wait import current_forming_ts
+
+        data_source = getattr(self._ctx, "data_source", None)
+        if data_source is None or not getattr(data_source, "_connected", False):
+            return
+        try:
+            bars = data_source.latest_snapshot(10)
+            ts = current_forming_ts(bars)
+            if ts is not None:
+                self._last_forming_ts_open = ts
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("refresh_last_forming_ts failed: %s", exc)
+
+    def _forming_bar_seconds_remaining(self) -> int | None:
+        """Seconds until the relevant forming bar closes."""
+        from pa_agent.data.bar_close_wait import seconds_until_bar_closes
+        from pa_agent.util.timefmt import now_local_ms
+
+        if self._pending_submit_after_close:
+            ts = self._wait_forming_ts
+            tf = self._pending_submit_timeframe
+        elif self._wait_close_checkbox.isChecked():
+            ts = self._last_forming_ts_open
+            tf = self._tf_combo.currentText()
+        else:
+            return None
+        if ts is None or not tf:
+            return None
+        return seconds_until_bar_closes(int(ts), tf, now_ms=now_local_ms())
+
+    def _update_wait_close_countdown_display(self) -> None:
+        """Update checkbox-adjacent countdown and status bar while waiting."""
+        lbl = getattr(self, "_wait_close_countdown_label", None)
+        show = self._wait_close_checkbox.isChecked() or self._pending_submit_after_close
+        if lbl is not None:
+            if not show:
+                lbl.setText("")
+            else:
+                secs = self._forming_bar_seconds_remaining()
+                if secs is None:
+                    lbl.setText("")
+                else:
+                    lbl.setText(f"还剩 {secs} 秒")
+                    lbl.setStyleSheet("color: #58a6ff; font-size: 11px;")
+        if self._pending_submit_after_close:
+            secs = self._forming_bar_seconds_remaining()
+            if secs is not None:
+                self._status_bar.showMessage(
+                    f"等待当前K线收盘…还剩 {secs} 秒（收盘后将自动提交分析）"
+                )
+
+    def _clear_pending_bar_close_wait(self) -> None:
+        """Cancel wait-for-bar-close armed by the checkbox."""
+        self._pending_submit_after_close = False
+        self._wait_forming_ts = None
+        self._pending_submit_symbol = ""
+        self._pending_submit_timeframe = ""
+        self._pending_submit_bar_count = 0
+        self._update_submit_button_state()
+        self._update_wait_close_countdown_display()
+
+    def _check_pending_bar_close(self, bars: Any) -> None:
+        """If the forming bar rolled over, start the deferred analysis."""
+        from pa_agent.data.bar_close_wait import forming_bar_has_closed
+
+        if not self._pending_submit_after_close or self._wait_forming_ts is None:
+            return
+        if not forming_bar_has_closed(self._wait_forming_ts, bars):
+            return
+
+        symbol = self._pending_submit_symbol
+        timeframe = self._pending_submit_timeframe
+        bar_count = self._pending_submit_bar_count
+        self._clear_pending_bar_close_wait()
+        self._status_bar.showMessage("最新K线已收盘，正在提交分析…")
+        self._start_analysis(symbol, timeframe, bar_count)
+
+    def _arm_wait_for_bar_close(self, symbol: str, timeframe: str, bar_count: int) -> bool:
+        """Wait until bars[0] ts_open changes, then call _start_analysis."""
+        from datetime import datetime
+
+        from pa_agent.data.bar_close_wait import current_forming_ts
+
+        data_source = getattr(self._ctx, "data_source", None)
+        if data_source is None or not getattr(data_source, "_connected", False):
+            self._status_bar.showMessage("数据源未连接")
+            return False
+
+        try:
+            bars_raw = data_source.latest_snapshot(bar_count + 5)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Wait-for-close snapshot failed: %s", exc)
+            self._status_bar.showMessage("获取K线失败，请稍后重试")
+            return False
+
+        if not bars_raw:
+            self._status_bar.showMessage("数据不足，请等待缓冲区填满后再提交")
+            return False
+
+        forming_ts = current_forming_ts(bars_raw)
+        if forming_ts is None:
+            self._status_bar.showMessage("无法识别当前K线")
+            return False
+
+        self._pending_submit_after_close = True
+        self._wait_forming_ts = forming_ts
+        self._last_forming_ts_open = forming_ts
+        self._pending_submit_symbol = symbol.strip()
+        self._pending_submit_timeframe = timeframe
+        self._pending_submit_bar_count = bar_count
+        self._update_submit_button_state()
+        self._update_wait_close_countdown_display()
+
+        secs = self._forming_bar_seconds_remaining()
+        try:
+            dt = datetime.fromtimestamp(forming_ts / 1000).strftime("%H:%M:%S")
+            ts_hint = f"开盘 {dt}"
+        except (OSError, OverflowError, ValueError):
+            ts_hint = f"ts={forming_ts}"
+
+        if secs is not None:
+            self._status_bar.showMessage(
+                f"等待当前K线收盘…还剩 {secs} 秒（{ts_hint}，收盘后将自动提交）"
+            )
+        else:
+            self._status_bar.showMessage(
+                f"等待当前K线收盘…（{ts_hint}，收盘后将自动提交分析）"
+            )
+        return True
 
     def _on_submit_analysis(self) -> None:
         """Handle the '提交分析' button click."""
@@ -564,18 +806,24 @@ class MainWindow(QMainWindow):
             self._worker.wait(_WORKER_JOIN_TIMEOUT_MS)
             self._worker = None
 
-        # Gather inputs
-        symbol = self._symbol_combo.currentText()
+        symbol = self._symbol_combo.currentText().strip()
         timeframe = self._tf_combo.currentText()
         bar_count = self._bar_count_spin.value()
 
-        # Try to build a KlineFrame snapshot
+        if self._wait_close_checkbox.isChecked():
+            if not self._arm_wait_for_bar_close(symbol, timeframe, bar_count):
+                return
+            return
+
+        self._start_analysis(symbol, timeframe, bar_count)
+
+    def _start_analysis(self, symbol: str, timeframe: str, bar_count: int) -> None:
+        """Build snapshot and run two-stage analysis (after optional bar-close wait)."""
         frame = self._take_snapshot(symbol, timeframe, bar_count)
         if frame is None:
             self._status_bar.showMessage("数据不足，请等待缓冲区填满后再提交")
             return
 
-        # Build orchestrator (if ctx has the necessary components)
         orchestrator = self._build_orchestrator()
         if orchestrator is None:
             self._status_bar.showMessage("编排器未就绪，请检查设置")
@@ -604,9 +852,11 @@ class MainWindow(QMainWindow):
             self._worker.reasoning_token.connect(panel.on_reasoning_token)
             self._worker.content_token.connect(panel.on_content_token)
 
+        self._set_chart_refresh_paused(True)
+
         self._analysis_in_progress = True
         self._update_submit_button_state()
-        self._status_bar.showMessage("分析中…")
+        self._status_bar.showMessage("分析中…（图表已暂停刷新）")
         self._decision_badge.setText("分析中…")
         self._ai_sidebar.focus_stream()
 
@@ -617,6 +867,13 @@ class MainWindow(QMainWindow):
         debug = getattr(self, "_debug_widget", None)
         if debug is not None:
             debug.clear()
+
+        tree_panel = getattr(self, "_decision_tree_panel", None)
+        if tree_panel is not None:
+            tree_panel.clear()
+            flow_viz = getattr(self, "_decision_flow_viz_panel", None)
+            if flow_viz is not None:
+                flow_viz.clear()
 
         pf = getattr(self, "_prompt_files_panel", None)
         if pf is not None:
@@ -657,10 +914,14 @@ class MainWindow(QMainWindow):
                 diagnosis_summary=decision.get("diagnosis_summary"),
                 stage1_diagnosis=self._last_stage1_diagnosis,
             )
+            self._bind_decision_tree(decision, self._last_stage1_diagnosis)
             order = inner.get("order_type", "—")
             self._decision_badge.setText(f"决策: {order}")
         else:
             self._decision_panel.clear()
+            self._decision_tree_panel.clear()
+            if getattr(self, "_decision_flow_viz_panel", None) is not None:
+                self._decision_flow_viz_panel.clear()
             self._decision_badge.setText("")
 
     def _on_record_ready(self, record: Any) -> None:
@@ -736,6 +997,10 @@ class MainWindow(QMainWindow):
                 inner,
                 diagnosis_summary=s2_full.get("diagnosis_summary"),
                 stage1_diagnosis=s1_diag if isinstance(s1_diag, dict) else None,
+            )
+            self._bind_decision_tree(
+                s2_full,
+                s1_diag if isinstance(s1_diag, dict) else None,
             )
 
         panel = getattr(self, "_stream_panel", None)
@@ -816,6 +1081,28 @@ class MainWindow(QMainWindow):
                     "total_output": completion_tokens,
                 })
 
+    def _bind_decision_tree(
+        self,
+        stage2_full: dict,
+        stage1_diagnosis: dict | None,
+    ) -> None:
+        """Push gate + decision traces to the decision tree tab."""
+        panel = getattr(self, "_decision_tree_panel", None)
+        if panel is None:
+            return
+        s1 = stage1_diagnosis or {}
+        trace_kw = dict(
+            gate_trace=s1.get("gate_trace"),
+            decision_trace=stage2_full.get("decision_trace"),
+            terminal=stage2_full.get("terminal"),
+            gate_result=s1.get("gate_result"),
+            gate_shortcircuited=bool(stage2_full.get("gate_shortcircuited")),
+        )
+        panel.set_trace(**trace_kw)
+        flow_viz = getattr(self, "_decision_flow_viz_panel", None)
+        if flow_viz is not None:
+            flow_viz.set_trace(**trace_kw)
+
     def _on_worker_done(self) -> None:
         """Reset in-progress flag and re-enable the submit button."""
         self._analysis_in_progress = False
@@ -863,18 +1150,50 @@ class MainWindow(QMainWindow):
 
     def _can_submit(self) -> bool:
         """Return True if the submit button should be enabled."""
+        return self._submit_block_reason() is None
+
+    def _on_exception_streak_reset(self) -> None:
+        """Re-enable submit after user clears validation error streak (原始 tab)."""
+        self._sync_submit_button_state()
+        if getattr(self, "_status_bar", None) is not None:
+            self._status_bar.showMessage("连续异常计数已清除，可以重新提交分析")
+
+    def _submit_block_reason(self) -> str | None:
+        """Human-readable reason when submit is disabled, or None if allowed."""
         if self._analysis_in_progress:
-            return False
+            return "分析进行中"
+        if self._pending_submit_after_close:
+            return "等待最新K线收盘"
         if self._switching:
-            return False
+            return "正在切换品种/周期"
         exc_count = self._get_consecutive_count()
         if exc_count >= 2:
-            return False
-        return True
+            return (
+                f"连续 JSON 校验失败 {exc_count} 次（已达上限 2）。"
+                "请到「原始」页点击「清除连续异常计数」，或删除 config/exception_state.json 后重启"
+            )
+        return None
+
+    def _sync_submit_button_state(self) -> None:
+        """Enable submit button and surface why it may be locked."""
+        if not hasattr(self, "_submit_btn"):
+            return
+        reason = self._submit_block_reason()
+        can = reason is None
+        self._submit_btn.setEnabled(can)
+        if can:
+            self._submit_btn.setToolTip("")
+        else:
+            self._submit_btn.setToolTip(reason or "")
+            status_bar = getattr(self, "_status_bar", None)
+            if status_bar is not None and reason and "连续 JSON" in reason:
+                cur = status_bar.currentMessage() or ""
+                if cur in ("就绪", "") or "连续" in cur or "提交分析已锁定" in cur:
+                    status_bar.showMessage(f"提交分析已锁定：{reason}")
 
     def _update_submit_button_state(self) -> None:
         """Enable or disable the submit button based on current state."""
-        self._submit_btn.setEnabled(self._can_submit())
+        self._sync_submit_button_state()
 
     def _get_consecutive_count(self) -> int:
         """Return the current consecutive exception count (0 if unavailable)."""

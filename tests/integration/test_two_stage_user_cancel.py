@@ -27,7 +27,7 @@ def test_cancel_before_stage2(frame, exc_counter, pending_writer, assembler, exp
         return stage1_reply
 
     client = MagicMock()
-    client.chat.side_effect = chat_side_effect
+    client.stream_chat.side_effect = chat_side_effect
 
     validator = JsonValidator()
     orchestrator = TwoStageOrchestrator(

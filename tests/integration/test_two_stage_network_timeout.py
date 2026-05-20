@@ -18,7 +18,7 @@ def test_network_timeout_stage1(frame, exc_counter, pending_writer, assembler, e
     """APITimeoutError on stage1 → consecutive_count unchanged, Stage1Failed emitted."""
     client = MagicMock()
     # openai.APITimeoutError requires a `request` parameter
-    client.chat.side_effect = openai.APITimeoutError(request=MagicMock())
+    client.stream_chat.side_effect = openai.APITimeoutError(request=MagicMock())
 
     validator = JsonValidator()
     orchestrator = TwoStageOrchestrator(

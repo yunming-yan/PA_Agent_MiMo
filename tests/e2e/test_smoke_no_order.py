@@ -17,43 +17,7 @@ from pa_agent.orchestrator.exception_counter import ExceptionCounter
 from pa_agent.ai.json_validator import JsonValidator
 from pa_agent.ai.router import route_strategy_files
 
-# ── Shared payloads ───────────────────────────────────────────────────────────
-
-VALID_STAGE1 = {
-    "cycle_position": "normal_channel",
-    "direction": "bullish",
-    "diagnosis_confidence": 75,
-    "market_phase": "stable",
-    "detected_patterns": [],
-    "key_signals": ["signal1"],
-    "htf_context": "bullish trend",
-    "entry_setup": "buy on pullback",
-    "strategy_files_needed": ["上涨通道分析识别.txt"],
-}
-
-VALID_STAGE2_NO_ORDER = {
-    "decision": {
-        "order_direction": None,
-        "order_type": "不下单",
-        "entry_price": None,
-        "take_profit_price": None,
-        "stop_loss_price": None,
-        "reasoning": "Market unclear",
-        "diagnosis_confidence": 40,
-        "diagnosis_confidence_reasoning": "周期位置存在歧义",
-        "trade_confidence": 30,
-        "trade_confidence_reasoning": "缺乏明确入场信号",
-        "key_factors": ["factor1"],
-        "watch_points": ["watch1"],
-        "risk_assessment": "high risk",
-        "invalidation_condition": "n/a",
-    },
-    "diagnosis_summary": {
-        "cycle_position": "normal_channel",
-        "direction": "bullish",
-        "key_signals": ["signal1"],
-    },
-}
+from tests.fixtures.ai_payloads import VALID_STAGE1, VALID_STAGE2_NO_ORDER
 
 
 def _make_reply(content_dict: dict) -> MagicMock:
@@ -88,7 +52,7 @@ def _make_ctx(tmp_path):
             buffer.append(bar)
 
     mock_client = MagicMock()
-    mock_client.chat.side_effect = [
+    mock_client.stream_chat.side_effect = [
         _make_reply(VALID_STAGE1),
         _make_reply(VALID_STAGE2_NO_ORDER),
     ]
