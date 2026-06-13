@@ -20,6 +20,70 @@ except ImportError as _exc:
 else:
     _OPENAI_IMPORT_ERROR = None
 
+try:
+    from anthropic import Anthropic as _Anthropic  # type: ignore[import]
+except ImportError as _exc:
+    _Anthropic = None  # type: ignore[assignment,misc]
+    _ANTHROPIC_IMPORT_ERROR = _exc
+else:
+    _ANTHROPIC_IMPORT_ERROR = None
+
+
+def _should_use_proxy(base_url: str) -> bool:
+    """Check if the target URL should use a proxy (respects NO_PROXY)."""
+    import os
+    from urllib.parse import urlparse
+
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    if not proxy_url:
+        return False
+    no_proxy = os.environ.get("NO_PROXY", "")
+    if no_proxy:
+        host = urlparse(base_url).hostname or ""
+        no_proxy_list = [h.strip().lower() for h in no_proxy.split(",")]
+        if host in no_proxy_list or any(host.endswith("." + h) for h in no_proxy_list if h):
+            return False
+    return True
+
+
+def _make_openai_client(base_url: str, api_key: str):
+    """Create an OpenAI client, respecting HTTP(S)_PROXY and NO_PROXY env vars."""
+    if _should_use_proxy(base_url):
+        import httpx
+        import os
+
+        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+        http_client = httpx.Client(proxy=proxy_url)
+        return _OpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
+    return _OpenAI(base_url=base_url, api_key=api_key)
+
+
+def _is_anthropic_provider(base_url: str, model: str) -> bool:
+    """True when the API uses Anthropic Messages format (e.g. mimo)."""
+    url = (base_url or "").lower()
+    m = (model or "").lower()
+    return "xiaomimimo" in url or "anthropic" in url and "mimo" in m
+
+
+def _make_anthropic_client(base_url: str, api_key: str):
+    """Create an Anthropic client for mimo-style providers."""
+    if _Anthropic is None:
+        raise RuntimeError("anthropic package is not installed") from _ANTHROPIC_IMPORT_ERROR
+
+    # Anthropic SDK expects base_url without /v1 suffix
+    clean_url = base_url.rstrip("/")
+    if clean_url.endswith("/v1"):
+        clean_url = clean_url[:-3]
+
+    if _should_use_proxy(base_url):
+        import httpx
+        import os
+
+        proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+        http_client = httpx.Client(proxy=proxy_url)
+        return _Anthropic(api_key=api_key, base_url=clean_url, http_client=http_client)
+    return _Anthropic(api_key=api_key, base_url=clean_url)
+
 logger = logging.getLogger(__name__)
 
 
@@ -304,6 +368,218 @@ class DeepSeekClient:
         """Replace in-memory provider settings (e.g. after QClaw auto-fallback)."""
         self._settings = settings
 
+    def _anthropic_chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        thinking: bool | None = None,
+        reasoning_effort: str | None = None,
+        cancel_token: "CancelToken | None" = None,
+        timeout_s: float = 600.0,
+    ) -> AIReply:
+        """Send messages using Anthropic Messages API format (for mimo)."""
+        if cancel_token is not None and cancel_token.is_set():
+            raise CancelledError("Request cancelled before API call")
+
+        _thinking = thinking if thinking is not None else self._settings.thinking
+        _effort = reasoning_effort if reasoning_effort is not None else self._settings.reasoning_effort
+
+        # Extract system message
+        system_text = ""
+        api_messages = []
+        for msg in messages:
+            if msg.get("role") == "system":
+                system_text += msg.get("content", "") + "\n"
+            else:
+                api_messages.append(msg)
+
+        client = _make_anthropic_client(self._settings.base_url, self._settings.api_key)
+        masked_key = mask_secret(self._settings.api_key)
+        self._log.debug(
+            "Anthropic chat: model=%s thinking=%s effort=%s key=...%s msgs=%d",
+            self._settings.model, _thinking, _effort,
+            masked_key[-4:] if len(masked_key) >= 4 else "****",
+            len(api_messages),
+        )
+
+        t0 = time.monotonic()
+        create_kwargs: dict[str, Any] = {
+            "model": self._settings.model,
+            "messages": api_messages,
+            "max_tokens": 8192,
+            "timeout": timeout_s,
+        }
+        if system_text.strip():
+            create_kwargs["system"] = system_text.strip()
+
+        # Thinking / extended thinking
+        if _thinking:
+            effort_map = {"none": 0, "low": 1024, "medium": 4096, "high": 16384, "max": 32768, "xhigh": 32768}
+            budget = effort_map.get((_effort or "medium").strip().lower(), 4096)
+            create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
+        try:
+            response = client.messages.create(**create_kwargs)
+        except Exception as exc:
+            latency_ms = (time.monotonic() - t0) * 1000
+            self._log.error("Anthropic API error after %.0f ms: %s", latency_ms, exc)
+            raise
+
+        latency_ms = (time.monotonic() - t0) * 1000
+
+        # Parse response
+        content = ""
+        reasoning_content = ""
+        for block in response.content:
+            if block.type == "text":
+                content += block.text
+            elif block.type == "thinking":
+                reasoning_content += block.thinking
+
+        usage = AIUsage(
+            prompt_tokens=getattr(response.usage, "input_tokens", 0),
+            cached_prompt_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+            completion_tokens=getattr(response.usage, "output_tokens", 0),
+            total_tokens=getattr(response.usage, "input_tokens", 0) + getattr(response.usage, "output_tokens", 0),
+        )
+        request_id = getattr(response, "id", "") or ""
+
+        raw: dict[str, Any] = {
+            "id": request_id,
+            "model": getattr(response, "model", ""),
+            "content": content,
+            "reasoning_content": reasoning_content,
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+            },
+            "latency_ms": latency_ms,
+        }
+
+        self._log.debug("Anthropic chat done: latency=%.0f ms tokens=%d/%d",
+                        latency_ms, usage.prompt_tokens, usage.completion_tokens)
+
+        return AIReply(
+            content=content,
+            reasoning_content=reasoning_content,
+            raw=raw,
+            usage=usage,
+            request_id=request_id,
+            latency_ms=latency_ms,
+        )
+
+    def _anthropic_stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        on_reasoning_token: Callable[[str], None] | None = None,
+        on_content_token: Callable[[str], None] | None = None,
+        thinking: bool | None = None,
+        reasoning_effort: str | None = None,
+        cancel_token: "CancelToken | None" = None,
+        timeout_s: float = 600.0,
+    ) -> AIReply:
+        """Stream messages using Anthropic Messages API format (for mimo)."""
+        if cancel_token is not None and cancel_token.is_set():
+            raise CancelledError("Request cancelled before API call")
+
+        _thinking = thinking if thinking is not None else self._settings.thinking
+        _effort = reasoning_effort if reasoning_effort is not None else self._settings.reasoning_effort
+
+        system_text = ""
+        api_messages = []
+        for msg in messages:
+            if msg.get("role") == "system":
+                system_text += msg.get("content", "") + "\n"
+            else:
+                api_messages.append(msg)
+
+        client = _make_anthropic_client(self._settings.base_url, self._settings.api_key)
+
+        t0 = time.monotonic()
+        create_kwargs: dict[str, Any] = {
+            "model": self._settings.model,
+            "messages": api_messages,
+            "max_tokens": 8192,
+            "timeout": timeout_s,
+        }
+        if system_text.strip():
+            create_kwargs["system"] = system_text.strip()
+
+        if _thinking:
+            effort_map = {"none": 0, "low": 1024, "medium": 4096, "high": 16384, "max": 32768, "xhigh": 32768}
+            budget = effort_map.get((_effort or "medium").strip().lower(), 4096)
+            create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
+        reasoning_content = ""
+        content = ""
+        request_id = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        try:
+            with client.messages.stream(**create_kwargs) as stream:
+                for event in stream:
+                    if cancel_token is not None and cancel_token.is_set():
+                        raise CancelledError("Request cancelled during streaming")
+
+                    if event.type == "content_block_start":
+                        pass
+                    elif event.type == "content_block_delta":
+                        if hasattr(event.delta, "thinking"):
+                            reasoning_content += event.delta.thinking
+                            if on_reasoning_token:
+                                on_reasoning_token(event.delta.thinking)
+                        elif hasattr(event.delta, "text"):
+                            content += event.delta.text
+                            if on_content_token:
+                                on_content_token(event.delta.text)
+                    elif event.type == "message_start":
+                        msg = event.message
+                        request_id = getattr(msg, "id", "") or ""
+                        if hasattr(msg, "usage"):
+                            prompt_tokens = getattr(msg.usage, "input_tokens", 0)
+
+                final_msg = stream.get_final_message()
+                if final_msg and hasattr(final_msg, "usage"):
+                    completion_tokens = getattr(final_msg.usage, "output_tokens", 0)
+
+        except CancelledError:
+            raise
+        except Exception as exc:
+            latency_ms = (time.monotonic() - t0) * 1000
+            self._log.error("Anthropic stream error after %.0f ms: %s", latency_ms, exc)
+            raise
+
+        latency_ms = (time.monotonic() - t0) * 1000
+
+        usage = AIUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+
+        raw: dict[str, Any] = {
+            "id": request_id,
+            "content": content,
+            "reasoning_content": reasoning_content,
+            "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+            "latency_ms": latency_ms,
+        }
+
+        self._log.info("Anthropic stream done: latency=%.0f ms reasoning=%d content=%d",
+                        latency_ms, len(reasoning_content), len(content))
+
+        return AIReply(
+            content=content,
+            reasoning_content=reasoning_content,
+            raw=raw,
+            usage=usage,
+            request_id=request_id,
+            latency_ms=latency_ms,
+        )
+
     def chat(
         self,
         messages: list[dict[str, Any]],
@@ -319,6 +595,13 @@ class DeepSeekClient:
         Raises CancelledError if cancel_token is set before the call.
         Never sends temperature/top_p/presence_penalty/frequency_penalty.
         """
+        # Route to Anthropic format for mimo-style providers
+        if _is_anthropic_provider(self._settings.base_url, self._settings.model):
+            return self._anthropic_chat(
+                messages, thinking=thinking, reasoning_effort=reasoning_effort,
+                cancel_token=cancel_token, timeout_s=timeout_s,
+            )
+
         # Check cancellation before making the network call
         if cancel_token is not None and cancel_token.is_set():
             raise CancelledError("Request cancelled before API call")
@@ -351,10 +634,7 @@ class DeepSeekClient:
         if _OpenAI is None:
             raise RuntimeError("openai package is not installed") from _OPENAI_IMPORT_ERROR
 
-        client = _OpenAI(
-            base_url=self._settings.base_url,
-            api_key=self._settings.api_key,
-        )
+        client = _make_openai_client(self._settings.base_url, self._settings.api_key)
 
         t0 = time.monotonic()
         create_kwargs: dict[str, Any] = {
@@ -483,6 +763,15 @@ class DeepSeekClient:
         Returns the same AIReply as chat() once the stream is complete.
         Raises CancelledError if cancel_token is set before or during the call.
         """
+        # Route to Anthropic format for mimo-style providers
+        if _is_anthropic_provider(self._settings.base_url, self._settings.model):
+            return self._anthropic_stream_chat(
+                messages, on_reasoning_token=on_reasoning_token,
+                on_content_token=on_content_token, thinking=thinking,
+                reasoning_effort=reasoning_effort, cancel_token=cancel_token,
+                timeout_s=timeout_s,
+            )
+
         if cancel_token is not None and cancel_token.is_set():
             raise CancelledError("Request cancelled before API call")
 
@@ -512,10 +801,7 @@ class DeepSeekClient:
         if _OpenAI is None:
             raise RuntimeError("openai package is not installed") from _OPENAI_IMPORT_ERROR
 
-        client = _OpenAI(
-            base_url=self._settings.base_url,
-            api_key=self._settings.api_key,
-        )
+        client = _make_openai_client(self._settings.base_url, self._settings.api_key)
 
         t0 = time.monotonic()
         reasoning_content = ""
