@@ -17,7 +17,9 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -159,7 +161,16 @@ class DecisionPanel(QWidget):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        # ── Scrollable content area ──
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
@@ -326,8 +337,11 @@ class DecisionPanel(QWidget):
         self._reasoning_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._reasoning_edit.setMinimumHeight(120)
+        self._reasoning_edit.setMinimumHeight(200)
         layout.addWidget(self._reasoning_edit, stretch=1)
+
+        scroll.setWidget(content)
+        root_layout.addWidget(scroll)
 
         self.clear()
 

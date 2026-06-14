@@ -31,8 +31,27 @@ from pa_agent.gui.validation_debug_dialog import show_validation_debug_dialog
 
 logger = logging.getLogger(__name__)
 
-# Zombie timeout in milliseconds (5 seconds)
-_WORKER_JOIN_TIMEOUT_MS = 5000
+# Zombie timeout in milliseconds (reduced from 5s to 200ms to prevent UI freezing)
+_WORKER_JOIN_TIMEOUT_MS = 200
+
+
+class _TVConnectivityWorker(QThread):
+    """Background worker for TradingView connectivity probe + delay."""
+
+    finished = pyqtSignal(bool, str)  # ok, detail
+
+    def run(self) -> None:
+        try:
+            from pa_agent.data.tradingview_connectivity import check_tradingview_connectivity
+            ok, detail = check_tradingview_connectivity()
+            if ok:
+                # Brief delay to let probe's WebSocket disconnect (avoids rate-limiting)
+                import time as _time
+                _time.sleep(1.5)
+            self.finished.emit(ok, detail or "")
+        except Exception as exc:
+            logger.warning("TV connectivity worker error: %s", exc)
+            self.finished.emit(False, str(exc))
 
 
 def _qobject_alive(obj: QObject | None) -> bool:
@@ -1307,23 +1326,34 @@ class MainWindow(QMainWindow):
         if data_source is None or not getattr(data_source, "_connected", False):
             self._status_bar.showMessage("数据源未连接，请先切换数据来源")
             return
-        # For TradingView, probe connectivity on-demand (not at startup)
+        # For TradingView, probe connectivity in background thread
         if self._current_data_source_kind() == "tradingview":
-            from pa_agent.data.tradingview_connectivity import check_tradingview_connectivity
-            ok, detail = check_tradingview_connectivity()
-            if not ok:
-                if detail:
-                    logger.info("TradingView unreachable: %s", detail)
-                from pa_agent.gui.tv_connectivity_dialog import show_tv_connectivity_blocked_dialog
-                choice = show_tv_connectivity_blocked_dialog(self)
-                if choice == "mt5":
-                    self._select_data_source_kind("mt5", switch=True)
-                return
-            # Brief pause to let the probe's WebSocket fully disconnect before
-            # the refresh loop opens its own connection (avoids TV rate-limiting)
-            import time as _time
-            _time.sleep(1.5)
-        # Stop any existing loop first so we can start fresh
+            self._status_bar.showMessage("正在检测 TradingView 连通性…")
+            self._tv_conn_worker = _TVConnectivityWorker(self)
+            self._tv_conn_worker.finished.connect(self._on_tv_connectivity_result)
+            self._tv_conn_worker.start()
+            return
+        # Non-TV sources: proceed directly
+        self._start_refresh_after_connectivity_check()
+
+    def _on_tv_connectivity_result(self, ok: bool, detail: str) -> None:
+        """Handle TradingView connectivity probe result from background thread."""
+        worker = getattr(self, "_tv_conn_worker", None)
+        if worker is not None:
+            worker.deleteLater()
+            self._tv_conn_worker = None
+        if not ok:
+            if detail:
+                logger.info("TradingView unreachable: %s", detail)
+            from pa_agent.gui.tv_connectivity_dialog import show_tv_connectivity_blocked_dialog
+            choice = show_tv_connectivity_blocked_dialog(self)
+            if choice == "mt5":
+                self._select_data_source_kind("mt5", switch=True)
+            return
+        self._start_refresh_after_connectivity_check()
+
+    def _start_refresh_after_connectivity_check(self) -> None:
+        """Start refresh loop after connectivity check passed."""
         self._stop_refresh_loop()
         self._set_chart_refresh_paused(False)
         self._start_refresh_loop()
@@ -2971,6 +3001,8 @@ class MainWindow(QMainWindow):
         """
         if not self._ui_is_alive():
             return
+        # Invalidate incremental cache since a new analysis just completed
+        self._invalidate_incremental_cache()
         if decision:
             from pa_agent.gui.stage2_payload import prepare_stage2_for_ui
 
@@ -3841,8 +3873,8 @@ class MainWindow(QMainWindow):
         """Check whether an incremental base record is available and update the
         submit button label accordingly ('增量分析' vs '提交分析').
 
-        This is a lightweight heuristic check — we only look up the prior record
-        when bars are already cached; if not cached we default to '提交分析'.
+        Uses a cache to avoid scanning files on every call. Cache is invalidated
+        when symbol/timeframe changes or after a new analysis completes.
         """
         if not hasattr(self, "_submit_btn"):
             return
@@ -3864,6 +3896,15 @@ class MainWindow(QMainWindow):
             self._submit_btn.setText("提交分析")
             self._incremental_available = False
             return
+
+        # Check cache: only re-scan if symbol/timeframe changed or cache expired
+        cache_key = f"{symbol}|{timeframe}"
+        cache = getattr(self, "_incremental_cache", None)
+        if cache is not None and cache.get("key") == cache_key:
+            cached_result = cache.get("result")
+            if cached_result is not None:
+                self._apply_incremental_cache_result(cached_result, bars, symbol, timeframe)
+                return
 
         try:
             from pa_agent.records.analysis_history import (
@@ -3897,12 +3938,37 @@ class MainWindow(QMainWindow):
             if threshold > 0 and delta.new_count <= threshold:
                 self._incremental_available = True
                 self._submit_btn.setText("增量分析")
+                # Cache the result
+                self._incremental_cache = {
+                    "key": cache_key,
+                    "result": True,
+                }
                 return
         except Exception:  # noqa: BLE001
             pass
 
         self._incremental_available = False
         self._submit_btn.setText("提交分析")
+        # Cache the negative result
+        self._incremental_cache = {
+            "key": cache_key,
+            "result": False,
+        }
+
+    def _apply_incremental_cache_result(
+        self, result: bool, bars: Any, symbol: str, timeframe: str
+    ) -> None:
+        """Apply cached incremental result to the submit button."""
+        if result:
+            self._incremental_available = True
+            self._submit_btn.setText("增量分析")
+        else:
+            self._incremental_available = False
+            self._submit_btn.setText("提交分析")
+
+    def _invalidate_incremental_cache(self) -> None:
+        """Invalidate the incremental cache (call after analysis completes)."""
+        self._incremental_cache = None
 
     def _update_submit_button_state(self) -> None:
         """Enable or disable the submit button based on current state."""

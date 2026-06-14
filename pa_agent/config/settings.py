@@ -20,6 +20,9 @@ class AIProviderSettings(BaseModel):
     thinking: bool = True
     reasoning_effort: Literal["low", "medium", "high", "max"] = "max"
     context_window: int = 2_000_000
+    #: Maximum output tokens (thinking + content) for Anthropic-protocol providers.
+    #: MiMo-V2.5-Pro supports up to 128K. Set to 0 or omit to use provider default.
+    max_output_tokens: int = 0
 
 
 class PromptSettings(BaseModel):

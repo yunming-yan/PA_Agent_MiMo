@@ -65,6 +65,17 @@ def _is_anthropic_provider(base_url: str, model: str) -> bool:
     return "xiaomimimo" in url or "anthropic" in url and "mimo" in m
 
 
+def _strip_1m_suffix(model: str) -> str:
+    """Strip the [1m] suffix from model name before sending to API.
+
+    Claude Code uses [1m] to indicate 1M context capability, but strips it
+    before sending to the provider. We follow the same convention.
+    """
+    if model and model.lower().endswith("[1m]"):
+        return model[:-4]
+    return model
+
+
 def _make_anthropic_client(base_url: str, api_key: str):
     """Create an Anthropic client for mimo-style providers."""
     if _Anthropic is None:
@@ -357,6 +368,53 @@ def _resolve_thinking_params(
     return {}, _effort or "medium"
 
 
+# ── Anthropic-protocol helpers ────────────────────────────────────────────────
+
+# MiMo-V2.5-Pro max output: 128K tokens (per Xiaomi docs).
+# Anthropic Opus/Sonnet max output: 128K tokens (per Anthropic docs).
+_ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS = 128_000
+
+
+def _anthropic_max_tokens(settings: AIProviderSettings) -> int:
+    """Return the max_tokens for Anthropic-protocol API calls.
+
+    Uses ``settings.max_output_tokens`` if configured (> 0), otherwise
+    falls back to the provider default (128K for MiMo/Anthropic).
+    """
+    configured = getattr(settings, "max_output_tokens", 0) or 0
+    if configured > 0:
+        return configured
+    return _ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
+
+
+# Effort → thinking budget mapping for Anthropic protocol.
+# budget_tokens must be < max_tokens (Anthropic spec constraint).
+_ANTHROPIC_EFFORT_BUDGET: dict[str, int] = {
+    "none": 0,
+    "low": 4_096,
+    "medium": 16_384,
+    "high": 49_152,
+    "max": 98_304,
+    "xhigh": 98_304,
+}
+
+
+def _anthropic_thinking_budget(effort: str | None, *, max_tokens: int) -> int:
+    """Return thinking budget_tokens, guaranteed to be < max_tokens.
+
+    Anthropic spec: ``budget_tokens`` must be less than ``max_tokens``.
+    If the effort-based budget would exceed the limit, it is clamped.
+    """
+    key = (effort or "medium").strip().lower()
+    budget = _ANTHROPIC_EFFORT_BUDGET.get(key, 16_384)
+    if budget <= 0:
+        return 0
+    # Anthropic constraint: budget_tokens < max_tokens
+    # Leave at least 4096 tokens for content output
+    max_budget = max(1024, max_tokens - 4096)
+    return min(budget, max_budget)
+
+
 class DeepSeekClient:
     """Thin wrapper around the OpenAI-compatible DeepSeek API."""
 
@@ -403,19 +461,22 @@ class DeepSeekClient:
         )
 
         t0 = time.monotonic()
+
+        # Resolve max_tokens: use configured value or default based on provider
+        _max_tokens = _anthropic_max_tokens(self._settings)
+
         create_kwargs: dict[str, Any] = {
-            "model": self._settings.model,
+            "model": _strip_1m_suffix(self._settings.model),
             "messages": api_messages,
-            "max_tokens": 8192,
+            "max_tokens": _max_tokens,
             "timeout": timeout_s,
         }
         if system_text.strip():
             create_kwargs["system"] = system_text.strip()
 
-        # Thinking / extended thinking
+        # Thinking / extended thinking — budget_tokens must be < max_tokens (Anthropic spec)
         if _thinking:
-            effort_map = {"none": 0, "low": 1024, "medium": 4096, "high": 16384, "max": 32768, "xhigh": 32768}
-            budget = effort_map.get((_effort or "medium").strip().lower(), 4096)
+            budget = _anthropic_thinking_budget(_effort, max_tokens=_max_tokens)
             create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         try:
@@ -498,18 +559,22 @@ class DeepSeekClient:
         client = _make_anthropic_client(self._settings.base_url, self._settings.api_key)
 
         t0 = time.monotonic()
+
+        # Resolve max_tokens: use configured value or default based on provider
+        _max_tokens = _anthropic_max_tokens(self._settings)
+
         create_kwargs: dict[str, Any] = {
-            "model": self._settings.model,
+            "model": _strip_1m_suffix(self._settings.model),
             "messages": api_messages,
-            "max_tokens": 8192,
+            "max_tokens": _max_tokens,
             "timeout": timeout_s,
         }
         if system_text.strip():
             create_kwargs["system"] = system_text.strip()
 
+        # Thinking / extended thinking — budget_tokens must be < max_tokens (Anthropic spec)
         if _thinking:
-            effort_map = {"none": 0, "low": 1024, "medium": 4096, "high": 16384, "max": 32768, "xhigh": 32768}
-            budget = effort_map.get((_effort or "medium").strip().lower(), 4096)
+            budget = _anthropic_thinking_budget(_effort, max_tokens=_max_tokens)
             create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         reasoning_content = ""

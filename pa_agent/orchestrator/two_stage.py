@@ -502,7 +502,7 @@ class TwoStageOrchestrator:
 
         s1_usage_calls: list[Any] = [getattr(reply_s1, "usage", None)]
 
-        def _call_s1_retry(msgs: list[dict]) -> Any:
+        def _call_s1_retry(msgs: list[dict], thinking: bool, effort: str | None) -> Any:
             nonlocal s1_streamed_reasoning, s1_streamed_content
             on_event(OrchestratorEvent.Stage1Retry)
             s1_streamed_reasoning = False
@@ -512,8 +512,8 @@ class TwoStageOrchestrator:
                 on_reasoning_token=_on_s1_reasoning,
                 on_content_token=_on_s1_content,
                 cancel_token=cancel_token,
-                thinking=_thinking,
-                reasoning_effort=_effort,
+                thinking=thinking,
+                reasoning_effort=effort,
             )
             if not s1_streamed_reasoning and r.reasoning_content:
                 _emit_buffered_stream(r.reasoning_content, on_stage1_reasoning)
@@ -534,6 +534,8 @@ class TwoStageOrchestrator:
                 "incremental_previous_stage1": prev_s1,
             },
             call_api=_call_s1_retry,
+            thinking=_thinking,
+            reasoning_effort=_effort,
         )
         messages_s1 = vr_s1.messages
         reply_s1 = vr_s1.reply
@@ -790,7 +792,7 @@ class TwoStageOrchestrator:
 
         s2_usage_calls: list[Any] = [getattr(reply_s2, "usage", None)]
 
-        def _call_s2_retry(msgs: list[dict]) -> Any:
+        def _call_s2_retry(msgs: list[dict], thinking: bool, effort: str | None) -> Any:
             nonlocal s2_streamed_reasoning, s2_streamed_content
             on_event(OrchestratorEvent.Stage2Retry)
             s2_streamed_reasoning = False
@@ -800,8 +802,8 @@ class TwoStageOrchestrator:
                 on_reasoning_token=_on_s2_reasoning,
                 on_content_token=_on_s2_content,
                 cancel_token=cancel_token,
-                thinking=_thinking,
-                reasoning_effort=_effort,
+                thinking=thinking,
+                reasoning_effort=effort,
             )
             if not s2_streamed_reasoning and r.reasoning_content:
                 _emit_buffered_stream(r.reasoning_content, on_stage2_reasoning)
@@ -822,6 +824,8 @@ class TwoStageOrchestrator:
                 "stage1_json": stage1_json,
             },
             call_api=_call_s2_retry,
+            thinking=_thinking,
+            reasoning_effort=_effort,
         )
         messages_s2 = vr_s2.messages
         reply_s2 = vr_s2.reply

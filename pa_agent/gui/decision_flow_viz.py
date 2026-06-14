@@ -914,6 +914,17 @@ class DecisionFlowVizPanel(QWidget):
             self._stop_playback(user_cancelled=True)
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event: Any) -> None:
+        """Start FX timer when tab becomes visible."""
+        super().showEvent(event)
+        if not self._fx_timer.isActive():
+            self._fx_timer.start(_FX_TICK_MS)
+
+    def hideEvent(self, event: Any) -> None:
+        """Stop FX timer when tab is hidden to save CPU."""
+        super().hideEvent(event)
+        self._fx_timer.stop()
+
     def _stop_playback(self, *, user_cancelled: bool = False) -> None:
         self._play_timer.stop()
         self._play_active = False

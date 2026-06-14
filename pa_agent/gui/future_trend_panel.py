@@ -11,7 +11,9 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -59,7 +61,16 @@ class FutureTrendPanel(QWidget):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        # ── Scrollable content area ──
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
@@ -101,14 +112,14 @@ class FutureTrendPanel(QWidget):
         self._bar_reasoning_edit.setReadOnly(True)
         self._bar_reasoning_edit.setObjectName("answerPane")
         self._bar_reasoning_edit.setStyleSheet(_REASON_EDIT_CSS)
-        self._bar_reasoning_edit.setMinimumHeight(80)
+        self._bar_reasoning_edit.setMinimumHeight(100)
         self._bar_reasoning_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         bar_layout.addWidget(self._bar_reasoning_edit, stretch=1)
 
         self._bar_group.setVisible(False)
-        layout.addWidget(self._bar_group, stretch=1)
+        layout.addWidget(self._bar_group)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
@@ -164,14 +175,17 @@ class FutureTrendPanel(QWidget):
         self._cycle_reasoning_edit.setReadOnly(True)
         self._cycle_reasoning_edit.setObjectName("answerPane")
         self._cycle_reasoning_edit.setStyleSheet(_REASON_EDIT_CSS)
-        self._cycle_reasoning_edit.setMinimumHeight(100)
+        self._cycle_reasoning_edit.setMinimumHeight(120)
         self._cycle_reasoning_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         cycle_layout.addWidget(self._cycle_reasoning_edit, stretch=1)
 
         self._cycle_group.setVisible(False)
-        layout.addWidget(self._cycle_group, stretch=2)
+        layout.addWidget(self._cycle_group)
+
+        scroll.setWidget(content)
+        root_layout.addWidget(scroll)
 
     # ── Module 1: next_bar_prediction ────────────────────────────────────────
 

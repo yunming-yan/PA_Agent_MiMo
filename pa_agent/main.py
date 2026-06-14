@@ -31,12 +31,12 @@ def main(argv: list[str] | None = None) -> int:
         from pa_agent.util.logging import update_api_key
         update_api_key(ctx.settings.provider.api_key)
 
-    # Build and show the main window
+    # Build and show the main window (maximized by default)
     from pa_agent.gui.main_window import MainWindow
     window = MainWindow(ctx)
-    window.show()
+    window.showMaximized()
 
-    logger.info("Main window shown")
+    logger.info("Main window shown (maximized)")
     return app.exec()
 
 

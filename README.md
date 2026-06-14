@@ -1,225 +1,174 @@
-# PA Agent — AI K线分析辅助工具（桌面端）
+# PA Agent — AI K线分析辅助工具（MiMo 魔改版）
 
 **原作者 UP 主：[阿尔法量化价格行为](https://space.bilibili.com/437555998)**
 
----
-
-> 面向主观交易者的 **价格行为（Price Action）** AI 辅助决策工具：从 **MT5 / TradingView / A股数据源**读取 K 线，将**结构化 K 线数据与程序预计算特征**送入大模型做**两阶段分析**（市场诊断 → 交易决策），**不是**截图识图，**不连接券商、不执行下单**。
+**原项目地址：https://github.com/rosemarycox5334-debug/PA_Agent**
 
 ---
 
-## 目录
+## 关于本版本
 
-- [项目简介](#项目简介)
-- [工作原理](#工作原理)
-- [环境要求](#环境要求)
-- [安装步骤](#安装步骤)
-- [启动程序](#启动程序)
-- [运行测试](#运行测试)
-- [目录结构](#目录结构)
-- [配置文件](#配置文件)
-- [参与贡献与安全](#参与贡献与安全)
-- [详细使用说明](#详细使用说明)
-- [图表 K 线与分析快照说明](#图表-k-线与分析快照说明)
-- [常见问题](#常见问题)
+本版本是基于原版 PA Agent 的**魔改版本**，主要针对**小米 MiMo 模型**进行了深度适配和优化。
 
----
+### 主要改动
 
-## 项目简介
+#### 1. MiMo 模型深度适配
+- 支持 `mimo-v2.5-pro[1m]` 模型名（自动剥离 `[1m]` 后缀，与 Claude Code 行为一致）
+- 适配 Anthropic 协议，支持 1M 上下文窗口
+- 优化 thinking budget 参数，符合 Anthropic API 规范
 
-PA Agent 是一款运行在 Windows 上的桌面辅助工具，帮助交易者按 Al Brooks 风格的价格行为框架理解当前图表，并把“看图”过程结构化成可复核的决策路径与字段。
+#### 2. 重试机制优化
+- 新增**思考耗尽检测**：当模型思考过长导致内容截断时自动降级
+- 自动调整 `reasoning_effort`：`max → high → medium → low`
+- 避免重试时思考深度暴降（从 30 万 token 降到 1 万 token）
 
-程序会：
+#### 3. UI 体验改进
+- **决策面板**：添加 QScrollArea，窗口缩小时可滚动查看全部内容
+- **未来走势预期**：添加 QScrollArea，解决内容截断问题
+- **默认全屏启动**：避免非全屏状态下的显示问题
 
-1. 通过 **MT5 / TradingView** 拉取你选定品种、周期的 OHLCV K 线（可含当前未收盘 K，图表实时显示）
-2. 本地计算 **EMA20、ATR14、K 线几何特征**（实体比、内包/外包、ii/iii、突破跟随等）
-3. 将 **K 线文本表 + 特征表 + 提示词工程模块** 发给大模型（支持 DeepSeek、PackyAPI、云雾等 OpenAI 兼容接口）
-4. 经 **阶段一（诊断）** 与 **阶段二（决策）** 输出结构化 JSON，并在界面上绘制入场/止损/止盈参考线
-
-**不会**把 K 线图截图发给 AI；模型读到的是与图表一致的数值化 K 线序列（K1 为最新已收盘棒）。
-
-### 主要功能
-
-- 📈 **MT5 实时 K 线** + 本地蜡烛图、EMA、序号标签
-- 🧠 **两阶段 AI 分析**：闸门诊断 → 策略路由 → 交易决策（限价/突破/市价或不下单）
-- 📋 **逐 K 摘要**（`bar_by_bar_summary`）与信号链校验，减少“口头看涨、JSON 做空”类矛盾
-- 🔄 **增量分析**：在上一轮成功记录基础上只分析新增已收盘 K 线
-- 💬 **分析后追问**：刷新并冻结图表后，用**与屏幕一致的 K 线表**继续向 AI 提问
-- 📚 **经验库**：按周期位置检索历史案例供阶段二参考
-- 📝 **完整落盘**：Prompt、原始响应、诊断/决策 JSON、Token 用量、追问记录
-- 🔒 **API Key** 本地 DPAPI 加密存储
-
-更完整的界面说明见仓库内 `[PA_Agent使用文档.md](PA_Agent使用文档.md)`。
-
-### MiMo 模型兼容说明
-
-本版本在原项目基础上增加了对小米 MiMo 系列模型的支持。MiMo API 的认证方式与原版支持的协议不同，修改了底层 `deepseek_client.py` 以兼容。
-
-**MiMo 配置（在 GUI 设置中填入）：**
-- **Base URL**: `https://token-plan-sgp.xiaomimimo.com/anthropic`
-- **Model**: `mimo-v2.5-pro`
-- **API Key**: 在 [MiMo 平台](https://platform.xiaomimimo.com) 申请
-
-**额外依赖：**
-```cmd
-pip install anthropic -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
-```
-
-| 模型 | 上下文 | 最大输出 | 推理能力 |
-|------|--------|---------|---------|
-| mimo-v2.5-pro | 1M | 128K | ✅ |
-| mimo-v2.5 | 1M | 128K | ✅ |
-| mimo-v2-pro | 1M | 128K | ✅ |
-
----
-
-## 工作原理
-
-```text
-MT5 终端 ──拉取 K 线──► 本地缓冲 / 图表显示
-                              │
-                              ▼
-                    提交分析（可选：等待当前 K 收盘）
-                              │
-         ┌────────────────────┴────────────────────┐
-         ▼                                         ▼
-   阶段一 · 市场诊断                          策略文件路由
-   （周期/方向/闸门/逐K摘要）                  （按诊断加载 prompt）
-         │                                         │
-         └────────────────────┬────────────────────┘
-                              ▼
-                    阶段二 · 交易决策
-                    （§9 信号链 / §10 风险收益 / §11 下单方式）
-                              │
-                              ▼
-              校验 JSON ──► 图表叠加线 ──► 记录保存 ──► 可追问
-```
-
-
-| 环节        | 说明                                                       |
-| --------- | -------------------------------------------------------- |
-| 数据来源      | **MetaTrader 5**（需终端已打开并登录）；品种名须与 MT5 市场报价一致（如 `US500m`） |
-| 送给 AI 的内容 | K 线表、几何特征表、阶段一诊断结果、路由后的策略提示词；阶段二另含决策树规则                  |
-| 图表作用      | 供你肉眼确认；分析时图表可暂停刷新，避免与提交数据不一致                             |
-| 输出        | 阶段一/二 JSON；阶段二含 `decision`、`decision_trace`、盈亏比等字段       |
-| 边界        | **仅辅助分析，不连接券商下单**                                        |
-
+#### 4. 性能优化
+- TradingView 连通性检测移到**后台线程**，不再阻塞 UI（原版会卡顿 69 秒）
+- 线程等待超时从 5 秒降到 200 毫秒，快速切换不再冻结
+- 决策树可视化 FX 定时器只在 tab 可见时运行，节省 CPU
+- 增量分析记录扫描添加缓存，避免每秒重复文件 I/O
 
 ---
 
 ## 环境要求
 
-
-| 项目           | 要求                                     |
-| ------------ | -------------------------------------- |
-| 操作系统         | Windows 10 / 11                        |
-| Python       | 3.11+（推荐官方安装包，安装时勾选 Add to PATH）       |
-| MetaTrader 5 | 可选，需券商账户登录；无券商账户请使用 TradingView 数据源 |
-| 显卡           | 无特殊要求                                  |
-| 网络           | 可访问你所配置的 AI API（如 DeepSeek、PackyAPI 等） |
-
+- **操作系统**：Windows 10/11
+- **Python**：3.10+
+- **数据源**：MT5 / TradingView / A股（AkShare）
 
 ---
 
-## 安装步骤
+## 安装步骤（适用于 Claude Code 等工具）
 
-### 1. 安装 Python 3.11+
+### 方式一：使用 Claude Code 安装
 
-从 [python.org](https://www.python.org/downloads/) 下载并安装，勾选 **Add Python to PATH**。
-
-```cmd
-python --version
-```
-
-### 2. 安装并登录 MetaTrader 5（可选）
-
-启动 MT5，登录券商账户，在「市场报价」中确认你要分析的品种名称（注意后缀，如 `m`）。
-
-**如果没有券商账户，可跳过 MT5，直接使用 TradingView 数据源**（免费，无需注册）。在程序 GUI 中将数据源切换为 `TradingView` 即可。
-
-### 3. 克隆或下载项目
-
-```cmd
-git clone <仓库地址>
+1. 克隆仓库：
+```bash
+git clone https://github.com/YOUR_USERNAME/PA_Agent.git
 cd PA_Agent
 ```
 
-### 4. 创建虚拟环境（推荐）
+2. 使用 Claude Code 安装依赖：
+```bash
+# 在 Claude Code 中运行
+pip install -e .
+```
 
-```cmd
+3. 配置模型：
+```bash
+# 复制示例配置
+cp config/settings.example.json config/settings.json
+
+# 编辑配置文件，填入你的 API 密钥
+# model: "mimo-v2.5-pro[1m]"
+# base_url: "https://token-plan-sgp.xiaomimimo.com/anthropic"
+# api_key: "你的 API 密钥"
+```
+
+### 方式二：手动安装
+
+1. 克隆仓库：
+```bash
+git clone https://github.com/YOUR_USERNAME/PA_Agent.git
+cd PA_Agent
+```
+
+2. 创建虚拟环境：
+```bash
 python -m venv .venv
 .venv\Scripts\activate
 ```
 
-### 5. 安装依赖
-
-```cmd
-pip install -e ".[dev]"
+3. 安装依赖：
+```bash
+pip install -e .
 ```
 
-若东财数据源被关闭：可改用 **TradingView** 拉 K 线。数据来源选 TradingView，支持 **A 股**（6 位 + SSE/SZSE）、**港股**（`HKEX` + 代码）与**股票名称**（如 `小米集团`，内置别名表；**品种框保持你输入的文字**，仅在后台按别名拉取 K 线）。交易所选 **（自动）** 时会依次探测合适市场。自定义名称可编辑 `config/tv_symbol_aliases.json`（参考 `tv_symbol_aliases.example.json`）。
-
-> 国内镜像示例：
->
-> ```cmd
-> pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple
-> # （GUI 已移除 AkShare 选项；如需仍可自行恢复/启用相关代码）
-> ```
-
-### 6. 配置 API
-
-复制配置模板（首次克隆建议执行）：
-
-```cmd
+4. 配置模型：
+```bash
+# 复制示例配置
 copy config\settings.example.json config\settings.json
+
+# 编辑 config\settings.json，填入你的 API 密钥
 ```
 
-启动程序后打开 **设置**，填写 **Base URL**、**模型名** 与 **API Key**（支持 DeepSeek 官方或第三方兼容网关）。Key 会加密写入 `config/settings.json`，不会以明文提交到 Git。
+---
 
-字段说明见 `[config/README.md](config/README.md)`。
+## 配置说明
+
+### MiMo 模型配置示例
+
+```json
+{
+  "provider": {
+    "model": "mimo-v2.5-pro[1m]",
+    "base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic",
+    "api_key": "你的 API 密钥",
+    "thinking": true,
+    "reasoning_effort": "max",
+    "context_window": 1048576,
+    "max_output_tokens": 128000
+  }
+}
+```
+
+### 参数说明
+
+| 参数 | 说明 | 推荐值 |
+|------|------|--------|
+| `model` | 模型名称 | `mimo-v2.5-pro[1m]` |
+| `base_url` | API 地址 | MiMo 官方地址 |
+| `thinking` | 启用思考模式 | `true` |
+| `reasoning_effort` | 思考深度 | `max` |
+| `context_window` | 上下文窗口 | `1048576`（1M） |
+| `max_output_tokens` | 最大输出 token | `128000` |
 
 ---
 
 ## 启动程序
 
-```cmd
+```bash
+# 方式一：使用批处理脚本
+运行智能体.bat
+
+# 方式二：直接运行
 python -m pa_agent.main
 ```
 
-或安装后：
-
-```cmd
-pa-agent
-```
-
-也可使用项目根目录的 `run.py`（若存在）。
-
-首次启动若提示数据源未连接，请先确认 MT5 已运行并已登录。
-
 ---
 
-## 运行测试
+## 测试配置环境
 
-```cmd
-pytest
+### 验证安装
+
+```bash
+# 测试导入
+python -c "from pa_agent.main import main; print('OK')"
+
+# 测试模型连接
+python -c "
+from pa_agent.config.settings import load_settings
+from pa_agent.ai.deepseek_client import DeepSeekClient
+s = load_settings()
+client = DeepSeekClient(s.provider)
+reply = client.chat([{'role': 'user', 'content': 'hi'}], thinking=False)
+print(f'Model: {reply.content[:50]}')
+"
 ```
 
-跳过端到端 / GUI 测试：
+### 运行测试
 
-```cmd
-pytest -m "not e2e"
-```
+```bash
+# 运行单元测试
+python -m pytest tests/unit/ -q
 
-仅单元测试：
-
-```cmd
-pytest -m unit
-```
-
-仅属性测试：
-
-```cmd
-pytest -m property
+# 运行集成测试
+python -m pytest tests/integration/ -q
 ```
 
 ---
@@ -228,147 +177,50 @@ pytest -m property
 
 ```
 PA_Agent/
-├── pa_agent/                  # 主程序包
-│   ├── main.py                # 程序入口
-│   ├── app_context.py         # 应用上下文
-│   ├── ai/                    # Prompt 组装、路由、JSON 校验、API 客户端
-│   ├── config/                # 配置模型与加载
-│   ├── data/                  # 数据源（MT5 等）与 K 线刷新循环
-│   ├── gui/                   # PyQt6 界面（图表、实时流、决策面板）
-│   ├── orchestrator/          # 两阶段分析编排、分析后追问
-│   ├── records/               # 分析记录读写
-│   ├── security/              # API Key 加密（Windows DPAPI）
+├── pa_agent/
+│   ├── ai/                    # AI 客户端、提示词、验证器
+│   ├── config/                # 配置文件
+│   ├── data/                  # 数据源（MT5、TradingView、AkShare）
+│   ├── gui/                   # PyQt6 界面
+│   ├── orchestrator/          # 两阶段分析流程
+│   ├── records/               # 分析记录
 │   └── util/                  # 工具函数
-├── prompt_engineering/        # 价格行为提示词与策略模块（.txt）
-├── tests/                     # 单元 / 属性 / 集成 / e2e 测试
-├── config/                    # 配置模板与说明（settings.json 本地生成，不提交）
-│   ├── settings.example.json
-│   └── README.md
-├── .github/workflows/         # CI（Windows + pytest）
-├── experience/                # 经验库案例
-├── records/                   # 分析记录（pending / 归档）
-├── logs/                      # 运行日志
-├── assets/                    # README 等资源（如打赏二维码）
-├── pyproject.toml
+├── config/
+│   ├── settings.example.json  # 配置示例
+│   └── settings.json          # 用户配置（不提交）
+├── tests/                     # 测试文件
 └── README.md
 ```
 
 ---
 
-## 配置文件
-
-配置文件位于 `config/`，首次运行自动生成，**勿将含密钥的文件提交到 Git**。
-
-
-| 文件                                    | 说明                                  |
-| ------------------------------------- | ----------------------------------- |
-| `config/settings.json`                | 主配置（API Key 存为 `api_key_encrypted`） |
-| `config/settings.example.json`        | 无密钥的模板（复制为 `settings.json`）         |
-| `config/exception_state.example.json` | 异常计数状态结构参考                          |
-| `config/exception_state.json`         | 运行时自动生成，不提交 Git                     |
-
-
-### 防止密钥被 push 到 GitHub
-
-1. 本机执行一次（可选）：
-  ```powershell
-   powershell -ExecutionPolicy Bypass -File tools\setup_git_secrets.ps1
-  ```
-2. 仅在 GUI「设置」或本地 `settings.json` 中配置 Key，不要写进 README / 测试用例。
-3. 默认 `pytest` 不跑需真实网络的 `live` 测试。
-
----
-
-## 参与贡献与安全
-
-
-| 文档                                   | 说明             |
-| ------------------------------------ | -------------- |
-| `[CONTRIBUTING.md](CONTRIBUTING.md)` | 开发环境、测试与 PR 约定 |
-| `[SECURITY.md](SECURITY.md)`         | 漏洞与密钥泄露报告方式    |
-| `[LICENSE](LICENSE)`                 | AGPL-3.0 许可证  |
-
-
----
-
-## 详细使用说明
-
-- 控制栏：**品种 / 周期 / K 线数**、**提交分析**、**增量分析**、**等待收盘**、**演示模式**
-- 右侧标签：**实时**（思考流 + 追问）、**决策树**、**决策**、**原始**、**调试** 等
-
-完整操作说明、交易倾向、策略路由表见：`[PA_Agent使用文档.md](PA_Agent使用文档.md)`
-
-**图表为何在分析后少 1 根 K 线？** 见 `[docs/图表K线与分析快照说明.md](docs/图表K线与分析快照说明.md)`
-
----
-
 ## 常见问题
 
-### Q: 启动时提示 `ModuleNotFoundError: No module named 'pa_agent'`
+### Q: 为什么选择 MiMo 模型？
+A: MiMo 是小米推出的国产大模型，支持 1M 上下文窗口，价格实惠，中文理解能力强，适合量化分析场景。
 
-在项目根目录激活虚拟环境后安装：
+### Q: 如何获取 MiMo API 密钥？
+A: 访问 [小米 MiMo 开放平台](https://mimo.mi.com/) 注册并获取 API 密钥。
 
-```cmd
-.venv\Scripts\activate
-pip install -e ".[dev]"
-```
+### Q: 支持其他模型吗？
+A: 支持任何 OpenAI 兼容接口的模型（DeepSeek、PackyAPI、云雾等），只需修改 `config/settings.json` 中的 `base_url` 和 `model`。
 
-### Q: 提示 MT5 未连接或没有 K 线
-
-1. 确认 MT5 终端已打开且已登录
-2. 品种名与 MT5「市场报价」完全一致（含 `m` 等后缀）
-3. 该品种在 MT5 中可正常显示 K 线
-
-### Q: 程序是不是把截图发给 AI？
-
-**不是。** 提交的是 K 线 OHLCV 文本表、程序算好的特征，以及提示词；图表仅供本地查看。
-
-### Q: 分析时图表不刷新了？
-
-分析进行中会**暂停图表自动刷新**，避免界面与提交数据不一致。可点 **图表实时更新** 恢复；追问发送时会先刷新一次再冻结，并以该时刻图表数据追问。
-
-### Q: API 调用失败
-
-检查网络、Base URL、模型名与 API Key；若用代理需在系统或网关侧配置。
-
-### Q: `config/settings.json` 损坏
-
-删除后重启，程序会重建默认配置：
-
-```cmd
-del config\settings.json
-```
-
-### Q: 如何更新
-
-```cmd
-git pull
-pip install -e ".[dev]"
-```
-
-### Q: 日志位置
-
-`logs/` 目录下。
+### Q: 程序卡顿怎么办？
+A: 本版本已优化性能，如果仍卡顿，请检查：
+1. 网络连接是否稳定
+2. TradingView 数据源是否可达
+3. 降低 `analysis_bar_count` 参数
 
 ---
 
-**免责声明**：本工具仅供学习与研究，不构成投资建议。交易有风险，决策后果自负。
+## 致谢
+
+- 原作者：[阿尔法量化价格行为](https://space.bilibili.com/437555998)
+- 原项目：https://github.com/rosemarycox5334-debug/PA_Agent
+- MiMo 模型：[小米 MiMo](https://mimo.mi.com/)
 
 ---
 
-本项目采用 [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE) 发布。
+## 免责声明
 
----
-
-## 打赏与支持
-
-如果你觉得这个程序对你有帮助的话，可以打赏激励原作者继续优化程序，感谢你的支持和鼓励！
-
-（原作者会优先解决打赏人的问题，因为人太多了！回复不过来！）
-
-**注意：打赏二维码为原作者所有，本 MiMo 兼容修改仅为小范围适配，核心工作均来自原作者。**
-
-<p align="center">
-  <img src="1d935cac3a4a4575bb3e34beda997633.jpeg" alt="打赏二维码" width="420" />
-</p>
-
+本工具仅供学习和研究使用，不构成任何投资建议。使用本工具进行交易决策的风险由用户自行承担。
